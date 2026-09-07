@@ -608,7 +608,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
   }
   async function onEnhance() {
     if (disposed) return;
-    if (loading) { enhanceController?.reject(new Error("已停止")); return; }
+    if (loading) { enhanceController?.reject?.(new Error("已停止")); return; }
     hideToast();
     const input = enhancementInput();
     if (!input) { toast("未找到输入框", "err"); return; }
@@ -621,8 +621,14 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     if (!cur.trim()) { toast("输入为空，先写点内容", "err"); return; }
     const s = loadSettings();
     setLoading(true);
-    const request = controllerRequest("enhance", { draft: cur, enhanceMode: s.enhanceMode, customTemplate: s.enhanceMode === "custom" ? s.customTemplate : undefined });
-    enhanceController = request;
+    // 可中断句柄：enhanceController 必须是带 reject 的对象（Promise 实例没有 reject
+    // 方法，误存 Promise 会让点停止时的调用抛 TypeError 且被 async 静默吞掉）
+    const stopHandle = { reject: null };
+    const request = new Promise((resolve, reject) => {
+      stopHandle.reject = reject;
+      controllerRequest("enhance", { draft: cur, enhanceMode: s.enhanceMode, customTemplate: s.enhanceMode === "custom" ? s.customTemplate : undefined }).then(resolve, reject);
+    });
+    enhanceController = stopHandle;
     const record = { id: `ZP-${Date.now().toString(36)}`, started: Date.now(), stage: "读取配置", outcome: "" };
     requestHistory.unshift(record);
     requestHistory.length = Math.min(requestHistory.length, 8);
@@ -660,7 +666,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     } finally {
       clearInterval(progressTimer);
       record.finished = Date.now();
-      if (enhanceController === request) { enhanceController = null; setLoading(false); }
+      if (enhanceController === stopHandle) { enhanceController = null; setLoading(false); }
       refreshSettingsActivity();
     }
   }

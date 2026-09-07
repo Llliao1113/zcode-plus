@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 // 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
-const CONTROLLER_VERSION = "1.2.3";
+const CONTROLLER_VERSION = "1.2.4";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
