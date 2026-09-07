@@ -1,0 +1,20 @@
+# 交接文档版本目录：只保留在本地，不进 git
+docs/handoff/
+handoff.md
+
+# 敏感与运行时产物：凭据/配置/日志不进仓库
+zcode-plus.log
+zcode-plus-config.json
+*.env
+.env.*
+credentials*.json
+
+# 生成产物：由 make-icon.mjs 派生，可随时重建
+ZCodePlus.ico
+
+# 临时文件
+node_modules/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
