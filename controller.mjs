@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
+// 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
+const CONTROLLER_VERSION = "1.2.1";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
@@ -647,6 +649,8 @@ class CdpConnection {
 let INJECT_SOURCE = "";
 try { INJECT_SOURCE = fs.readFileSync(path.join(INSTALL_DIR, "inject.js"), "utf8"); }
 catch (error) { log("无法读取 inject.js:", safeError(error)); process.exit(1); }
+// 注入前把控制器版本带进页面：设置面板显示的版本以此为准，避免 inject.js 内硬编码漏同步
+INJECT_SOURCE = `globalThis.__zcodePlusControllerVersion = ${JSON.stringify(CONTROLLER_VERSION)};\n` + INJECT_SOURCE;
 
 // ---- 页面请求分发 ----
 async function handleBinding(cdp, sessionId, payload) {
@@ -834,7 +838,7 @@ function runInstaller() {
   console.log("安装模式：本目录文件已就绪（exe 分发形态无需额外部署）");
 }
 if (process.argv.includes("--version")) {
-  console.log("ZCode+ controller 1.2.1");
+  console.log(`ZCode+ controller ${CONTROLLER_VERSION}`);
   process.exit(0);
 }
 if (process.argv.includes("--install")) {

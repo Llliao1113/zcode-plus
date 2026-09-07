@@ -18,7 +18,10 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, "dist");
-const VERSION = "1.2.1";
+// 版本号唯一来源是 controller.mjs 的 CONTROLLER_VERSION，构建时解析（避免多处维护漏同步）
+const VERSION = fs.readFileSync(path.join(ROOT, "controller.mjs"), "utf8")
+  .match(/const CONTROLLER_VERSION = "([^"]+)"/)?.[1];
+if (!VERSION) throw new Error("controller.mjs 中未找到 CONTROLLER_VERSION，构建中止");
 const APP_DIR = path.join(DIST, `ZCodePlus-${VERSION}`);
 const NODE_HOST_DIR = path.join(ROOT, "build", "node-host", "node-v24.15.0-win-x64");
 
@@ -36,6 +39,10 @@ function ensureOfficialNode() {
 }
 
 function main() {
+  // inject.js 版本必须来自控制器注入（面板显示），不允许再硬编码数字版本
+  if (/"1\.\d+\.\d+"/.test(fs.readFileSync(path.join(ROOT, "inject.js"), "utf8"))) {
+    throw new Error("inject.js 仍含硬编码版本号（应读 __zcodePlusControllerVersion），构建中止");
+  }
   // 不删除既有目录（可能被运行中的 controller 占用）；逐文件覆盖写入
   fs.mkdirSync(APP_DIR, { recursive: true });
   const nodeExe = ensureOfficialNode();

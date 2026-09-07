@@ -6,7 +6,9 @@ ZCode+ 提示词增强注入脚本（WorkBuddy 社区移植，非 ZCode / WorkBu
 Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License.
 */
 (() => {
-  const VERSION = "1.2.0";
+  // 版本由控制器注入（globalThis.__zcodePlusControllerVersion）；直接在浏览器调试时回退 "dev"。
+  // 该值同时是运行时身份：控制器版本变化后重注入会替换旧运行时
+  const VERSION = globalThis.__zcodePlusControllerVersion || "dev";
   const RUNTIME_KEY = "__zcodePlusEnhanceRuntime";
   const OWNER = "zcode-plus-v1";
   const SETTINGS_KEY = "zcodePlusEnhance.settings.v1";
@@ -610,7 +612,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     overlay.innerHTML = `
       <div class="wb-panel" role="dialog" aria-modal="true" aria-labelledby="wb-settings-title" tabindex="-1">
         <header class="wb-header">
-          <h3 id="wb-settings-title">ZCode+ 增强设置 <small>1.2.0</small></h3>
+          <h3 id="wb-settings-title">ZCode+ 增强设置 <small>${VERSION}</small></h3>
           <button class="wb-icon" data-wb="close" type="button" aria-label="关闭设置" title="关闭设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg></button>
         </header>
         <div class="wb-body">
