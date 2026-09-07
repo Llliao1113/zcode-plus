@@ -9,7 +9,9 @@ zcode-plus-config.json
 .env.*
 credentials*.json
 
-# 生成产物：由 make-icon.mjs 派生，可随时重建
+# 构建产物与官方 node 宿主（体积大且可随时重建：node build-exe.mjs）
+build/
+dist/
 ZCodePlus.ico
 
 # 临时文件

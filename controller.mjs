@@ -23,7 +23,19 @@ const CDP_BOOT_TIMEOUT_MS = 30000;
 const PORT_RANGE = [9333, 9350];
 
 const installConfig = readJson(CONFIG_FILE) || {};
-const ZCODE_PATH = process.env.ZCODE_PLUS_ZCODE_PATH || installConfig.zcodePath || "D:\\Zcode\\ZCode.exe";
+// 分发场景不硬编码安装路径：配置文件优先，其次常见安装位置探测
+const ZCODE_PATH_CANDIDATES = [
+  process.env.ZCODE_PLUS_ZCODE_PATH || installConfig.zcodePath,
+  "D:\\Zcode\\ZCode.exe",
+  "C:\\Program Files\\ZCode\\ZCode.exe",
+  path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"),
+].filter(Boolean);
+function findZcodePath() {
+  for (const p of ZCODE_PATH_CANDIDATES) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
 const PORT_PREFERRED = Number(process.env.ZCODE_PLUS_PORT) || installConfig.port || PORT_RANGE[0];
 
 function readJson(file) {
@@ -216,9 +228,9 @@ async function askCloseOriginal() {
     } catch { resolve(false); }
   });
 }
-function launchZcode(port) {
-  const child = spawn(ZCODE_PATH, [`--remote-debugging-port=${port}`], {
-    cwd: path.dirname(ZCODE_PATH),
+function launchZcode(port, zcodePath) {
+  const child = spawn(zcodePath, [`--remote-debugging-port=${port}`], {
+    cwd: path.dirname(zcodePath),
     detached: false, stdio: "ignore",
     shell: false,
   });
@@ -600,9 +612,42 @@ async function handleBinding(cdp, sessionId, payload) {
   }
 }
 
+// exe（SEA）模式首次运行自动创建桌面快捷方式；node 模式由 install.mjs 创建
+function ensureDesktopShortcut() {
+  let isSea = false;
+  try { isSea = require("node:sea").isSea(); } catch {}
+  if (!isSea) return;
+  const exe = process.execPath;
+  const icon = path.join(INSTALL_DIR, "ZCodePlus.ico");
+  const lnk = path.join(os.homedir(), "Desktop", "ZCode+.lnk");
+  try {
+    if (fs.existsSync(lnk)) return;
+    const ps = [
+      `$ws = New-Object -ComObject WScript.Shell`,
+      `$l = $ws.CreateShortcut('${lnk.replace(/'/g, "''")}')`,
+      `$l.TargetPath = '${exe.replace(/'/g, "''")}'`,
+      `${fs.existsSync(icon) ? `$l.IconLocation = '${icon.replace(/'/g, "''")}',0` : ""}`,
+      `$l.Description = 'ZCode+ Prompt Enhance'`,
+      `$l.Save()`,
+    ].filter(Boolean).join("; ");
+    execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '`"')}"`, { timeout: 30000 });
+    log("已创建桌面快捷方式 ZCode+");
+  } catch (error) {
+    log("创建桌面快捷方式失败（不影响使用）:", safeError(error));
+  }
+}
+
 // ---- 主流程 ----
 async function main() {
-  log(`ZCode+ 控制器启动 (zcode=${ZCODE_PATH})`);
+  const zcodePath = findZcodePath();
+  if (!zcodePath) {
+    log(`未找到 ZCode.exe，候选路径：${ZCODE_PATH_CANDIDATES.join("; ")}`);
+    const cmd = `powershell -NoProfile -Command "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('未找到 ZCode.exe。请先安装 ZCode 桌面版，或把 ZCode+ 放到 ZCode 安装目录旁运行。', 'ZCode+', 'OK', 'Warning')"`;
+    try { execSync(cmd, { timeout: 60000 }); } catch {}
+    process.exit(1);
+  }
+  log(`ZCode+ 控制器启动 (zcode=${zcodePath})`);
+  ensureDesktopShortcut();
   // 1) 已有 ZCode+ 在跑 → 直接附着（幂等注入）
   const running = await findRunningZcodePlus();
   if (running) {
@@ -623,7 +668,7 @@ async function main() {
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
   const port = await findFreePort(PORT_PREFERRED);
   log(`使用调试端口 ${port}，拉起 ZCode+`);
-  launchZcode(port);
+  launchZcode(port, zcodePath);
   const version = await waitForCdp(port, CDP_BOOT_TIMEOUT_MS);
   if (!version) {
     log(`等待 CDP 就绪超时（${CDP_BOOT_TIMEOUT_MS / 1000}s），退出。请检查 ZCode 是否正常启动`);
@@ -671,6 +716,24 @@ async function serveCdp(wsUrl) {
     if (attempt >= 5) { log("CDP 重试次数用尽，控制器退出"); process.exit(1); }
     await new Promise((r) => setTimeout(r, 2000));
   }
+}
+
+// ---- CLI 模式：--install（部署文件与快捷方式后退出）、--version ----
+function runInstaller() {
+  const files = ["inject.js", "ZCodePlus.ico"];
+  for (const f of files) {
+    const src = path.join(INSTALL_DIR, f);
+    if (fs.existsSync(src)) continue; // 同目录运行：文件已在位
+  }
+  console.log("安装模式：本目录文件已就绪（exe 分发形态无需额外部署）");
+}
+if (process.argv.includes("--version")) {
+  console.log("ZCode+ controller 1.2.0");
+  process.exit(0);
+}
+if (process.argv.includes("--install")) {
+  runInstaller();
+  process.exit(0);
 }
 
 main().catch((error) => {

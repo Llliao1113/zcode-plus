@@ -1,65 +1,149 @@
+<div align="center">
+
 # ZCode+ 提示词增强
 
-WorkBuddy「提示词增强」社区移植版（非 ZCode / WorkBuddy / Augment 官方产品）。在 ZCode 输入框左下角模式切换右侧注入星芒按钮：点击把当前草稿发给模型，改写得更清晰后回填输入框，检查后发送；支持撤销。另附 `/enhance`、`/enhance-creative` 两个斜杠技能（主模型就地增强，零配置）。
+**为 ZCode 桌面版注入一键式提示词增强（Prompt Enhancement）**
 
-## 架构
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)]()
+[![Dependencies: Zero](https://img.shields.io/badge/Dependencies-Zero-green.svg)]()
+
+在输入框旁注入一颗星芒按钮 ✨ —— 点击把当前草稿发给模型，改写得更清晰后回填，检查后发送，支持撤销。
+
+**社区支持 · [LINUX DO](https://linux.do/)**
+
+</div>
+
+---
+
+## 项目介绍
+
+写提示词时经常词不达意：想法很多，表达模糊，模型理解偏差。ZCode+ 把 WorkBuddy 的「提示词增强」体验带到 ZCode 桌面版——你写草稿，它交给模型改写成一份更清晰、更具体、更可执行的提示词，回填输入框由你检查后发送；不满意一键撤销，原文永远不丢。
 
 ```
-桌面「ZCode+」快捷方式 → launcher.vbs → node controller.mjs
-  ├─ 分配空闲端口（默认 9333，占用则顺延 9334-9350，启动前 bind 检测，杜绝冲突）
-  ├─ 以 --remote-debugging-port 拉起 ZCode.exe（CDP 通道，不改安装目录）
-  ├─ 向页面注入 inject.js（星芒按钮/回填/撤销/设置面板；刷新自动重注入）
-  ├─ 页面经 CDP binding 把草稿发给控制器 → 调用模型 → 结果回传页面回填
-  └─ 自动模式：读取 ZCode 当前模型配置（~/.zcode/v2/），Key 只存控制器内存
+写好草稿 → 点击 ✨ → 模型改写 → 回填输入框 → 你检查 → 发送
+                ↘ 一键撤销，恢复原文
 ```
 
-原 ZCode 桌面快捷方式不受影响：想用原版直接点原版（两者是同一个单实例应用，不能同时运行）；若原版已在跑，点 ZCode+ 会询问是否关闭原版并以 ZCode+ 重启。
+内置三套增强模式可切换，并支持完全自定义模板：
 
-## 安装 / 更新
+| 模式 | 风格 | 适用 |
+|---|---|---|
+| **WorkBuddy 原版** | 简洁精确，约 800 字符上限 | 日常任务，快进快出 |
+| **创意增强** | 充分展开，无字数限制，保留代码/报错原文 | 开放性需求、复杂设计 |
+| **自定义模板** | 你的模板即 user 消息，`{input}` 占位符插入草稿 | 完全掌控增强行为 |
 
-要求：Node.js 18+（控制器用 Node 22+ 原生 WebSocket，推荐 24）。
+连接配置默认「跟随 ZCode 当前模型」：自动匹配输入框当前显示的供应商与模型（含自定义请求头透传），凭据只在本地控制器内存中使用。也支持手动配置任意 OpenAI 兼容 / Anthropic 协议服务。
+
+## 运行原理
+
+ZCode 桌面版是 Electron 应用，UI 为 Chromium 渲染的 Web DOM，但没有官方用户脚本或扩展机制。ZCode+ 通过 Chrome DevTools Protocol 实现非侵入注入：
+
+```
+桌面「ZCode+」入口（vbs 无窗口启动）
+   └→ 本地控制器（常驻 Node 进程，凭据仅存于此）
+        ├─ 分配空闲调试端口（默认 9333，占用自动顺延 9334-9350，启动前 bind 检测）
+        ├─ 以 --remote-debugging-port 拉起 ZCode.exe（不改安装目录、不碰签名）
+        ├─ CDP 向页面注入增强脚本（页面刷新/新窗口自动重注入）
+        ├─ 页面脚本经 Runtime binding 发送当前草稿 → 控制器调用模型 → 回传
+        └─ 页面回填（回填前校验草稿未变，改稿/切任务时结果保留不覆盖）
+```
+
+关键设计：
+
+- **原版 ZCode 零影响**：不改安装目录、不破坏签名、不干扰自动更新；想用原版直接点原版快捷方式
+- **凭据不落盘**：API Key / OAuth 凭据仅存于控制器进程内存，不写盘、不进日志、不回传页面，错误信息自动脱敏
+- **端口防冲突**：bind 预检 + 顺延策略，杜绝端口冲突
+- **单实例友好**：原版 ZCode 运行中时，ZCode+ 弹窗询问是否关闭重启
+
+## 技术栈
+
+- **零第三方依赖**——控制器与页面脚本均为原生 JavaScript
+- [Node.js](https://nodejs.org) 18+（推荐 22+，使用原生 WebSocket / fetch）；发行包内嵌官方 Node 运行时，**用户机器无需安装 Node**
+- Chrome DevTools Protocol（`Target.setAutoAttach`、`Page.addScriptToEvaluateOnNewDocument`、`Runtime.addBinding`）
+- Electron 远程调试（`--remote-debugging-port`）
+- 图标与安装器同为纯 Node 实现（PNG 解码 → ICO 打包）
+
+## 安装（Windows）
+
+### 方式一：下载发行包（推荐，零依赖）
+
+1. 从 [Releases](../../releases) 下载 `ZCodePlus-vX.Y.Z.zip`
+2. 解压到任意目录（推荐 `%LOCALAPPDATA%\ZCodePlus`）
+3. 双击文件夹内 **「启动 ZCode+.vbs」** 即可使用；右键发送到桌面快捷方式可获得带独立图标（ZCode 原版图标反色：白底黑 Z）的「ZCode+」入口
+
+前置条件：已安装 ZCode 桌面版（首次运行自动探测常见安装路径，未找到会弹窗提示）。
+
+### 方式二：从源码运行（开发者）
 
 ```bash
+git clone <本仓库地址>
 cd zcode-plus
-node install.mjs            # 自动探测 D:\Zcode\ZCode.exe；非此路径时 node install.mjs "<完整路径>"
+node install.mjs        # 部署到 %LOCALAPPDATA%\ZCodePlus 并创建桌面快捷方式
 ```
 
-重复运行即覆盖更新。更新模板/脚本后无需重装，controller 每次启动读取 inject.js 最新内容。
+或前台调试模式：`node controller.mjs`（控制台直接看日志）。
 
 ## 使用
 
-- 双击桌面 **ZCode+** 启动（首次注入约在窗口就绪后 1-2 秒）
-- 写草稿 → 点星芒按钮 → 等待回填（最长 90 秒，再点可停止）→ 检查后发送
-- 增强后左侧出现撤销按钮，点击恢复本轮增强前文案（不请求模型）
-- **右键星芒按钮**打开设置：增强模式三选一——WorkBuddy 原版（简洁，约 800 字符）/ 创意增强（充分展开）/ **自定义模板**（用户模板作为 user 消息直接发给模型，`{input}` 占位符表示草稿插入位置，必填，上限 2 万字符；选中后显示模板编辑器，可一键填入示例）；连接配置
-- 自定义模板注意：输出排版规则（分段/逐项换行/代码块保护）仍会附加在系统消息里生效；模板在 localStorage 持久保存，随页面同域
-- 连接配置两种模式：
-  - **跟随 ZCode 当前模型**（默认）：读取当前会话模型对应的供应商；凭据运行时读取，不保存不落盘
-  - **手动**：填 Base URL / API Key / 模型 / 协议（Chat Completions、Responses 或 Anthropic Messages）；手动 Key 保存在页面 localStorage
-- 斜杠技能：`/enhance <草稿>`（WorkBuddy 模板）、`/enhance-creative <草稿>`（创意模板），主模型就地增强，不走外部配置
+1. 通过「ZCode+」入口启动（原版 ZCode 运行中会弹窗询问是否重启）
+2. 等待 2-3 秒，输入框左下角模式切换右侧出现星芒按钮 ✨
+3. 写草稿 → 点击星芒（最长 90 秒，处理中再点可停止）→ 等待回填 → 检查 → 发送
+4. 增强后左侧出现撤销按钮，一键恢复本轮增强前文案（不请求模型）
+5. **右键星芒按钮**打开设置面板：
+
+   - 增强模式三选一（含自定义模板编辑器，附示例模板一键填入）
+   - 连接配置：跟随 ZCode 当前模型（默认，凭据不保存）/ 手动模式（Base URL、API Key、模型、协议三选）
+   - 状态与诊断：最近错误、最近 8 次增强记录（脱敏）、最近一次完整结果（可复制）
 
 ## 排错
 
-1. 前台诊断：运行安装目录下 `start-zcode-plus.bat`，看控制台输出
-2. 日志：安装目录 `zcode-plus.log`
-3. 按钮不出现：确认是从 ZCode+ 快捷方式启动（原版无 CDP 无注入）；等待 2 秒
-4. 增强失败：右键按钮 → 设置 → 复制错误/诊断
-5. 端口被外部程序占用时会自动顺延 9334-9350；全占用则启动失败并写日志
-6. ZCode 大版本更新后按钮消失：DOM 结构可能变化，更新 zcode-plus 源码中的选择器
-
-## 安全说明
-
-- API Key / OAuth 凭据只存在于控制器进程内存；不写盘、不进日志、不回传页面
-- 草稿只发给所配置的模型服务（增强请求本身），不带会话历史、附件或代码库
-- CDP 调试端口仅监听 127.0.0.1；本机其他进程理论上可连接该端口（等同开着 DevTools）。介意时关闭 ZCode 即彻底关闭端口
-- 手动模式 API Key 保存于页面 localStorage（与原版行为一致）；错误提示自动脱敏
-
-## 文件
-
-| 文件 | 职责 |
+| 现象 | 处理 |
 |---|---|
-| `controller.mjs` | CDP 控制器：端口分配、拉起 ZCode、注入、binding 通信、LLM 调用、自动模式配置解析 |
-| `inject.js` | 页面脚本：星芒按钮、回填、撤销、设置面板、Toast、诊断 |
-| `launcher.vbs` / `start-zcode-plus.bat` | 隐藏启动 / 前台诊断启动 |
-| `make-icon.mjs` | 从 ZCode 原版图标（黑底白 Z）像素级反色生成 ZCode+ 图标（白底黑 Z），纯 Node PNG 解码/编码 + ICO 打包 |
-| `install.mjs` | 安装/更新：复制到 %LOCALAPPDATA%\ZCodePlus、建桌面快捷方式 |
+| 按钮不出现 | 确认从「ZCode+」入口启动（原版无 CDP 通道无注入）；等待 2-3 秒 |
+| 增强失败 | 右键按钮 → 设置 → 复制错误信息到社区反馈 |
+| 查看日志 | 控制台启动 `ZCodePlus.exe controller.mjs`；日志在安装目录 `zcode-plus.log` |
+| 端口冲突 | 自动顺延 9334-9350；全占用则启动失败并写日志 |
+| ZCode 大版本更新后按钮消失 | 页面结构可能变化，更新本仓库 inject.js 后重启 |
+
+## 隐私与安全
+
+- 增强请求只包含当前草稿文本，不携带会话历史、附件或代码库内容
+- 自动模式凭据运行时读取（用户级 + 工作区级配置），仅存控制器内存
+- 手动模式 API Key 保存于本机页面 localStorage
+- CDP 调试端口仅监听 127.0.0.1（本机回环）；介意时关闭 ZCode 即彻底关闭端口
+
+## 构建
+
+```bash
+node build-exe.mjs    # 生成 dist/ZCodePlus-vX.Y.Z.zip（内嵌官方 Node 的发行包）
+node make-icon.mjs    # 从 ZCode 原版图标像素级反色生成 ZCode+ 图标
+```
+
+## 许可证与免责声明
+
+### 开源许可
+
+本项目以 [MIT License](LICENSE) 开源。
+
+页面内图标改编自 [Lucide](https://lucide.dev)（ISC License）。
+
+### 免责声明
+
+- 本项目为**社区兴趣驱动的非官方移植**，与 ZCode 官方无任何关系；ZCode、其名称、商标、官方资源（含原版图标）归其权利人所有，本项目未获得其官方授权或认可
+- 项目灵感来源于 Augment WorkBuddy 的提示词增强功能，同样与 Augment 无隶属关系
+- 本项目依赖 ZCode 桌面版的非公开内部接口（Chrome DevTools Protocol 注入与页面 DOM 结构），**不承诺对未来 ZCode 版本的兼容性**；ZCode 更新导致功能失效属预期风险，请谨慎用于生产环境
+- 增强请求会将当前草稿发送至你配置的模型服务，可能消耗 API 额度；发送前请自行确认内容与配置
+- 软件按「现状」提供，使用产生的一切后果由使用者自行承担
+
+## 社区
+
+感谢 [LINUX DO](https://linux.do/) 社区的支持。
+
+问题反馈、功能讨论与交流，欢迎前往 [LINUX DO](https://linux.do/)。
+
+<div align="center">
+
+**ZCode+ —— 把模糊的想法，变成清晰的指令。**
+
+</div>
