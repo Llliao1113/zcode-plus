@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 // 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
-const CONTROLLER_VERSION = "1.2.1";
+const CONTROLLER_VERSION = "1.2.2";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
@@ -664,6 +664,16 @@ async function handleBinding(cdp, sessionId, payload) {
       const cfg = resolve();
       const text = await callLLM(cfg, String(msg.draft || ""), msg.enhanceMode, msg.customTemplate);
       await cdp.reply(sessionId, id, { ok: true, text });
+    } else if (msg.type === "insertText") {
+      // 页面回填富文本编辑器的受信输入通道：先受信 Ctrl+A 全选再插入，镜像真实用户操作。
+      // ZCode 3.11+ 的 Lexical 输入框对程序化选区/合成事件不认账（会丢弃或按内部选区追加），
+      // 只有受信按键走真实输入管线才可靠；本分支不读取任何配置
+      const text = String(msg.text ?? "");
+      if (!text || text.length > 100000) throw new Error("无效的 insertText 请求");
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 }, sessionId);
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 }, sessionId);
+      await cdp.send("Input.insertText", { text }, sessionId);
+      await cdp.reply(sessionId, id, { ok: true });
     } else if (msg.type === "models") {
       const cfg = resolve();
       const models = await fetchModelList(cfg);

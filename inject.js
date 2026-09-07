@@ -182,7 +182,19 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return el.value;
     return el.innerText || el.textContent || "";
   }
-  function writeText(el, text) {
+  // 富文本编辑器（如 Lexical）在微任务里异步提交 DOM：写入后轮询回读，等提交落地再校验
+  function waitEditorAccept(el, text, timeoutMs = 900) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve) => {
+      (function poll() {
+        if (readText(el) === text) return resolve(true);
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(poll, 40);
+      })();
+    });
+  }
+  async function writeText(el, rawText) {
+    const text = String(rawText).replace(/\r\n?/g, "\n");
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
       const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value");
       if (desc && desc.set) desc.set.call(el, text);
@@ -192,30 +204,59 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
       const focus = document.activeElement;
       const selection = window.getSelection();
       const ranges = Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange());
+      const original = readText(el);
       // 普通 white-space 会把纯文本回填中的换行及连续空格折叠
       el.style.whiteSpace = "pre-wrap";
-      let ok = false;
-      try {
+      const selectAll = () => {
         el.focus({ preventScroll: true });
         const sel = window.getSelection();
         sel.removeAllRanges();
         const range = document.createRange();
         range.selectNodeContents(el);
         sel.addRange(range);
-        // execCommand 产生真实 input 事件，受控组件的草稿状态才能同步
-        ok = document.execCommand("insertText", false, text);
-      } catch {
-        ok = false;
+      };
+      let done = false;
+      // 通道1：控制器受信输入。控制器先发受信 Ctrl+A 全选再插入，镜像真实用户操作。
+      // ZCode 3.11+ 的 Lexical 输入框对程序化选区与合成事件不认账（丢弃 execCommand、
+      // 回滚直接 DOM 改写、粘贴按内部选区追加），受信按键走真实输入管线才可靠
+      if (typeof window.__wbEnhance === "function") {
+        try {
+          el.focus({ preventScroll: true });
+          if (document.activeElement === el) {
+            await controllerRequest("insertText", { text });
+            done = await waitEditorAccept(el, text);
+          }
+        } catch { done = false; }
       }
-      if (!ok || readText(el) !== text) {
-        el.textContent = text;
-        const caret = document.createRange();
-        caret.selectNodeContents(el);
-        caret.collapse(false);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(caret);
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+      // 通道2：合成粘贴（控制器不在时的降级；部分编辑器只按粘贴处理多行文本）
+      if (!done) {
+        try {
+          selectAll();
+          const data = new DataTransfer();
+          data.setData("text/plain", text);
+          el.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+          done = await waitEditorAccept(el, text, 600);
+        } catch { done = false; }
+      }
+      // 通道3：旧路径兜底（简单 contenteditable 编辑器；execCommand 产生真实 input 事件，
+      // 受控组件的草稿状态才能同步）
+      if (!done) {
+        try {
+          selectAll();
+          document.execCommand("insertText", false, text);
+        } catch {}
+        done = await waitEditorAccept(el, text, 500);
+        if (!done) {
+          el.textContent = text;
+          const caret = document.createRange();
+          caret.selectNodeContents(el);
+          caret.collapse(false);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(caret);
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+          done = await waitEditorAccept(el, text, 500);
+        }
       }
       if (focus !== el && focus?.isConnected) {
         focus.focus({ preventScroll: true });
@@ -224,6 +265,24 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         for (const range of ranges) {
           if (range.commonAncestorContainer.isConnected) selection.addRange(range);
         }
+      }
+      if (!done) {
+        // 三通道全败：尽力恢复原草稿，避免半写入内容（如换行被丢弃的文本）覆盖原文
+        if (readText(el) !== original) {
+          try {
+            el.focus({ preventScroll: true });
+            if (document.activeElement === el && typeof window.__wbEnhance === "function") {
+              await controllerRequest("insertText", { text: original });
+            } else {
+              selectAll();
+              const data = new DataTransfer();
+              data.setData("text/plain", original);
+              el.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+            }
+            await waitEditorAccept(el, original, 500);
+          } catch {}
+        }
+        throw new Error("输入框未完整接受写入内容，结果已保留");
       }
     }
     if (readText(el) !== text) throw new Error("输入框未完整接受写入内容，结果已保留");
@@ -461,12 +520,12 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     const candidates = [...scope.querySelectorAll('textarea, [contenteditable="true"]')].filter(isVisible);
     return candidates.length === 1 ? candidates[0] : findComposerInput();
   }
-  function applyEnhancement(target, before, text) {
+  async function applyEnhancement(target, before, text) {
     const input = resolveTarget(target);
     if (!input) return { state: "stale", reason: "输入区域已变化或页面已切换" };
     if (!snapshotMatches(input, before)) return { state: "conflict", reason: "原文已修改" };
     lastState = null;
-    writeText(input, text);
+    await writeText(input, text);
     const written = resolveTarget(target);
     if (!written) throw new Error("回填后无法确认输入框状态，结果已保留，可在设置中复制");
     if (!readText(written).trim()) throw new Error("编辑器回填内容为空，结果已保留，可在设置中复制");
@@ -499,7 +558,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     undo.title = state.reason || "撤销本轮增强";
     undo.setAttribute("aria-label", undo.title);
   }
-  function onUndo() {
+  async function onUndo() {
     if (disposed) return;
     const { input, reason } = undoAvailability();
     if (reason) {
@@ -509,7 +568,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     }
     try {
       const before = lastState.before;
-      writeText(input, before.text);
+      await writeText(input, before.text);
       const written = resolveTarget(lastState.target);
       if (!written || !snapshotMatches(written, before)) {
         lastState = null;
@@ -578,7 +637,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         toast("增强已完成，但输入区已变化，结果已保留，可在设置中复制。", "err");
         return;
       }
-      writeText(current, cleaned);
+      await writeText(current, cleaned);
       lastState = { target: { ...target, input: current }, before, after: editorSnapshot(current) };
       record.outcome = "已写回";
       toast("已增强，请检查后发送", "ok");
