@@ -16,15 +16,31 @@ const SRC = path.dirname(fileURLToPath(import.meta.url));
 const DEST = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ZCodePlus");
 const DESKTOP = path.join(os.homedir(), "Desktop");
 
-const CANDIDATE_ZCODE = [
-  "D:\\Zcode\\ZCode.exe",
-  "C:\\Program Files\\ZCode\\ZCode.exe",
-  "C:\\Users\\" + os.userInfo().username + "\\AppData\\Local\\Programs\\ZCode\\ZCode.exe",
-];
-
+function listDriveRoots() {
+  const roots = [];
+  for (let code = "C".charCodeAt(0); code <= "Z".charCodeAt(0); code++) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try { if (fs.existsSync(root)) roots.push(root); } catch {}
+  }
+  return roots;
+}
+// 与 controller.mjs 的探测链保持一致：不硬编码本机路径
 function findZcode() {
-  for (const p of CANDIDATE_ZCODE) {
-    if (fs.existsSync(p)) return p;
+  const candidates = [
+    path.join(SRC, "ZCode.exe"),
+    "C:\\Program Files\\ZCode\\ZCode.exe",
+    "C:\\Program Files (x86)\\ZCode\\ZCode.exe",
+    path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"),
+  ];
+  for (const root of listDriveRoots()) {
+    candidates.push(path.join(root, "zcode", "ZCode.exe"));
+  }
+  try {
+    const out = execSync("where ZCode.exe", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+    candidates.push(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0]);
+  } catch {}
+  for (const p of candidates) {
+    try { if (p && fs.statSync(p).isFile()) return p; } catch {}
   }
   return null;
 }
@@ -38,6 +54,7 @@ function main() {
   const zcodePath = process.argv[2] || findZcode();
   if (!zcodePath || !fs.existsSync(zcodePath)) {
     console.error("[错误] 未找到 ZCode.exe。用法：node install.mjs <ZCode.exe 完整路径>");
+    console.error("       已尝试：源码目录、各盘符 zcode 目录、标准安装位置、PATH。");
     process.exit(1);
   }
   // 2) 复制文件
@@ -53,8 +70,18 @@ function main() {
     console.log("[提示] 未找到 ZCode 原版图标 " + zcodeIcon + "，沿用已有 ZCodePlus.ico");
   }
   fs.copyFileSync(path.join(SRC, "ZCodePlus.ico"), path.join(DEST, "ZCodePlus.ico"));
-  // 4) 配置（端口默认 9333，可用环境变量 ZCODE_PLUS_PORT 覆盖；启动前会做占用检测）
-  const config = { zcodePath, port: 9333, installedAt: new Date().toISOString() };
+  // 4) 配置（探测/手动指定的 zcodePath 落盘，controller 启动时直接使用；zcodePath 留空则启动时重新探测）
+  const config = {
+    _readme: [
+      "ZCode+ 配置文件(JSON 格式，不支持注释)",
+      "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
+      "推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；用反斜杠则必须写成双反斜杠。",
+      "port：调试端口，默认 9333；被占用时自动顺延(9334-9350)。",
+    ],
+    zcodePath,
+    port: 9333,
+    installedAt: new Date().toISOString(),
+  };
   fs.writeFileSync(path.join(DEST, "zcode-plus-config.json"), JSON.stringify(config, null, 2));
   // 5) 桌面快捷方式 ZCode+（独立图标，不动原 ZCode 快捷方式）
   const ps = `

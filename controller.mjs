@@ -22,21 +22,83 @@ const REQUEST_TIMEOUT_MS = 90000;
 const CDP_BOOT_TIMEOUT_MS = 30000;
 const PORT_RANGE = [9333, 9350];
 
-const installConfig = readJson(CONFIG_FILE) || {};
-// 分发场景不硬编码安装路径：配置文件优先，其次常见安装位置探测
-const ZCODE_PATH_CANDIDATES = [
-  process.env.ZCODE_PLUS_ZCODE_PATH || installConfig.zcodePath,
-  "D:\\Zcode\\ZCode.exe",
-  "C:\\Program Files\\ZCode\\ZCode.exe",
-  path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"),
-].filter(Boolean);
-function findZcodePath() {
-  for (const p of ZCODE_PATH_CANDIDATES) {
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  return null;
+// 首次运行生成默认配置文件：自动探测失败时用户可在此手动填写 ZCode 路径
+function ensureDefaultConfig() {
+  if (fs.existsSync(CONFIG_FILE)) return;
+  const config = {
+    _readme: [
+      "ZCode+ 配置文件(JSON 格式，不支持注释)",
+      "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
+      "自动探测失败时在此填写，推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；",
+      "用反斜杠则必须写成双反斜杠，例如 \"E:\\\\zcode\\\\ZCode.exe\"。",
+      "port：调试端口，默认 9333；被占用时自动顺延(9334-9350)。",
+    ],
+    zcodePath: "",
+    port: PORT_RANGE[0],
+  };
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf8");
+    log(`已生成默认配置文件：${CONFIG_FILE}`);
+  } catch (error) { log("生成默认配置文件失败:", safeError(error)); }
 }
-const PORT_PREFERRED = Number(process.env.ZCODE_PLUS_PORT) || installConfig.port || PORT_RANGE[0];
+ensureDefaultConfig();
+
+// 显式配置的 ZCode 路径：实时读取（弹窗引导编辑配置后无需重启进程即可重试生效）
+function configuredZcodePath() {
+  return String(process.env.ZCODE_PLUS_ZCODE_PATH || readJson(CONFIG_FILE)?.zcodePath || "").trim() || null;
+}
+function listDriveRoots() {
+  const roots = [];
+  for (let code = "C".charCodeAt(0); code <= "Z".charCodeAt(0); code++) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try { if (fs.existsSync(root)) roots.push(root); } catch {}
+  }
+  return roots;
+}
+function isFile(p) {
+  try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+// 分发场景不硬编码安装路径：显式配置优先，其次多来源探测
+function findZcodePath() {
+  // 1) 显式配置（环境变量 > 配置文件）：意图明确，路径无效时直接报错，不静默回退
+  const configured = configuredZcodePath();
+  if (configured) {
+    if (isFile(configured)) return { path: configured, source: "手动配置" };
+    return { path: null, error: `配置的 zcodePath 无效（该路径不是可用的 ZCode.exe）：${configured}` };
+  }
+  const candidates = [];
+  const add = (p, source) => { if (p) candidates.push({ p, source }); };
+  // 2) ZCode+ 所在目录及逐级向上：覆盖「把 ZCode+ 放进 ZCode 安装目录或其子目录」
+  let cur = INSTALL_DIR;
+  for (let depth = 0; depth < 6 && cur; depth++) {
+    add(path.join(cur, "ZCode.exe"), "ZCode+ 所在位置");
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  // 3) 各盘符根下的常见目录名（Windows 路径不区分大小写，一种写法即可）：覆盖自定义盘自定义目录安装（如 E:\zcode）
+  for (const root of listDriveRoots()) {
+    add(path.join(root, "zcode", "ZCode.exe"), "盘符常见位置");
+  }
+  // 4) Windows 标准安装位置
+  add("C:\\Program Files\\ZCode\\ZCode.exe", "标准安装位置");
+  add("C:\\Program Files (x86)\\ZCode\\ZCode.exe", "标准安装位置");
+  add(path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"), "标准安装位置");
+  // 5) PATH 中的 ZCode.exe（PATH 含失效网络路径时 where 可能变慢，限 5 秒）
+  try {
+    const out = execSync("where ZCode.exe", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+    add(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0], "PATH");
+  } catch {}
+  const tried = [];
+  for (const { p, source } of candidates) {
+    tried.push(p);
+    try { if (isFile(p)) return { path: p, source, tried }; } catch {}
+  }
+  return { path: null, tried };
+}
+function portPreferred() {
+  return Number(process.env.ZCODE_PLUS_PORT) || readJson(CONFIG_FILE)?.port || PORT_RANGE[0];
+}
 
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
@@ -218,21 +280,33 @@ function zcodeProcessesRunning() {
     return /ZCode\.exe/i.test(out);
   } catch { return false; }
 }
+// 弹窗文本走 base64（UTF-16LE）：规避中文/换行/引号在 cmd→PowerShell 间的多层转义
+function showMessageBox(text, buttons = "OK") {
+  const b64 = Buffer.from(text, "utf16le").toString("base64");
+  const cmd = `powershell -NoProfile -Command "$t=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}')); Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($t,'ZCode+','${buttons}','Warning')"`;
+  try { return execSync(cmd, { encoding: "utf8", timeout: 120000 }).trim(); }
+  catch { return ""; }
+}
 async function askCloseOriginal() {
   // 询问是否关闭正在运行的原版 ZCode（用户可能丢未发送草稿，必须显式确认）
-  return new Promise((resolve) => {
-    const cmd = `powershell -NoProfile -Command "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('ZCode 原版正在运行，ZCode+ 需要独占启动。是否关闭原版并以 ZCode+ 重启？', 'ZCode+', 'YesNo', 'Warning')"`;
-    try {
-      const out = execSync(cmd, { encoding: "utf8", timeout: 120000 }).trim();
-      resolve(out.includes("Yes"));
-    } catch { resolve(false); }
-  });
+  return showMessageBox(
+    "ZCode 原版正在运行，ZCode+ 需要独占启动。是否关闭原版并以 ZCode+ 重启？",
+    "YesNo",
+  ).includes("Yes");
 }
 function launchZcode(port, zcodePath) {
   const child = spawn(zcodePath, [`--remote-debugging-port=${port}`], {
     cwd: path.dirname(zcodePath),
     detached: false, stdio: "ignore",
     shell: false,
+  });
+  child.once("error", (error) => {
+    log(`拉起 ZCode 失败: ${safeError(error)}（zcodePath=${zcodePath}）`);
+    showMessageBox(
+      `拉起 ZCode 失败：${safeError(error)}\n\n请检查配置中的 zcodePath 是否指向 ZCode.exe：\n${CONFIG_FILE}`,
+      "OK",
+    );
+    process.exit(1);
   });
   child.once("exit", (code) => {
     log(`ZCode 进程退出 (code=${code})，控制器随之退出`);
@@ -639,14 +713,46 @@ function ensureDesktopShortcut() {
 
 // ---- 主流程 ----
 async function main() {
-  const zcodePath = findZcodePath();
-  if (!zcodePath) {
-    log(`未找到 ZCode.exe，候选路径：${ZCODE_PATH_CANDIDATES.join("; ")}`);
-    const cmd = `powershell -NoProfile -Command "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('未找到 ZCode.exe。请先安装 ZCode 桌面版，或把 ZCode+ 放到 ZCode 安装目录旁运行。', 'ZCode+', 'OK', 'Warning')"`;
-    try { execSync(cmd, { timeout: 60000 }); } catch {}
+  let found = findZcodePath();
+  if (found.error || !found.path) {
+    // 探测失败：引导用户在配置文件中手动填写 zcodePath（编辑保存后自动重试一次）
+    log(found.error || `未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`);
+    const guide = found.error
+      ? found.error
+      : `自动探测未找到 ZCode.exe（已尝试 ZCode+ 所在位置、各盘符常见目录、标准安装位置、PATH）。`;
+    const choice = showMessageBox(
+      guide + `\n\n请在配置文件中手动填写 zcodePath：\n${CONFIG_FILE}\n\n`
+        + `示例（推荐正斜杠，反斜杠需写成双反斜杠）：\n"zcodePath": "E:/zcode/ZCode.exe"\n\n`
+        + `是否现在用记事本打开配置文件编辑？（保存后 ZCode+ 自动重试）`,
+      "YesNo",
+    );
+    if (choice.includes("Yes")) {
+      try { spawn("notepad.exe", [CONFIG_FILE], { detached: true, stdio: "ignore" }).unref(); } catch {}
+      // 轮询等待（最长 3 分钟）：路径有效即提前继续；用户已保存但路径仍无效/留空也提前结束
+      // （Win11 记事本可能把文件并入已有窗口进程，不能依赖其进程生命周期）
+      let mtimeBefore = 0;
+      try { mtimeBefore = fs.statSync(CONFIG_FILE).mtimeMs; } catch {}
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const cfg = configuredZcodePath();
+        if (cfg && isFile(cfg)) break;
+        try { if (fs.statSync(CONFIG_FILE).mtimeMs !== mtimeBefore) break; } catch {}
+      }
+      found = findZcodePath(); // 配置实时读取，编辑结果直接生效
+    }
+  }
+  if (found.error || !found.path) {
+    const detail = found.error || `仍未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`;
+    log(detail);
+    showMessageBox(
+      `启动失败：${found.error || "未找到 ZCode.exe。"}\n\n`
+        + `请在配置文件中检查 zcodePath 后重新运行：\n${CONFIG_FILE}\n\n日志：${LOG_FILE}`,
+      "OK",
+    );
     process.exit(1);
   }
-  log(`ZCode+ 控制器启动 (zcode=${zcodePath})`);
+  log(`ZCode+ 控制器启动 (zcode=${found.path}, 来源=${found.source})`);
   ensureDesktopShortcut();
   // 1) 已有 ZCode+ 在跑 → 直接附着（幂等注入）
   const running = await findRunningZcodePlus();
@@ -666,9 +772,9 @@ async function main() {
     await new Promise((r) => setTimeout(r, 2500));
   }
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
-  const port = await findFreePort(PORT_PREFERRED);
+  const port = await findFreePort(portPreferred());
   log(`使用调试端口 ${port}，拉起 ZCode+`);
-  launchZcode(port, zcodePath);
+  launchZcode(port, found.path);
   const version = await waitForCdp(port, CDP_BOOT_TIMEOUT_MS);
   if (!version) {
     log(`等待 CDP 就绪超时（${CDP_BOOT_TIMEOUT_MS / 1000}s），退出。请检查 ZCode 是否正常启动`);
@@ -728,7 +834,7 @@ function runInstaller() {
   console.log("安装模式：本目录文件已就绪（exe 分发形态无需额外部署）");
 }
 if (process.argv.includes("--version")) {
-  console.log("ZCode+ controller 1.2.0");
+  console.log("ZCode+ controller 1.2.1");
   process.exit(0);
 }
 if (process.argv.includes("--install")) {

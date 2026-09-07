@@ -72,7 +72,7 @@ ZCode 桌面版是 Electron 应用，UI 为 Chromium 渲染的 Web DOM，但没�
 2. 解压到任意目录（推荐 `%LOCALAPPDATA%\ZCodePlus`）
 3. 双击文件夹内 **「启动 ZCode+.vbs」** 即可使用；右键发送到桌面快捷方式可获得带独立图标（ZCode 原版图标反色：白底黑 Z）的「ZCode+」入口
 
-前置条件：已安装 ZCode 桌面版（首次运行自动探测常见安装路径，未找到会弹窗提示）。
+前置条件：已安装 ZCode 桌面版。首次运行自动探测安装位置（ZCode+ 所在目录及上级、各盘符 `\zcode` 目录、标准安装位置、PATH）；探测失败会弹窗引导，在安装目录的 `zcode-plus-config.json` 中手动填写 `zcodePath` 即可（首次运行自动生成该文件）。
 
 ### 方式二：从源码运行（开发者）
 
@@ -96,10 +96,22 @@ node install.mjs        # 部署到 %LOCALAPPDATA%\ZCodePlus 并创建桌面快�
    - 连接配置：跟随 ZCode 当前模型（默认，凭据不保存）/ 手动模式（Base URL、API Key、模型、协议三选）
    - 状态与诊断：最近错误、最近 8 次增强记录（脱敏）、最近一次完整结果（可复制）
 
+## 配置文件
+
+安装目录下的 `zcode-plus-config.json`（首次运行自动生成，带 `_readme` 说明）：
+
+| 字段 | 说明 |
+|---|---|
+| `zcodePath` | ZCode.exe 完整路径；留空 `""` 表示自动探测；推荐正斜杠写法 `E:/zcode/ZCode.exe`，反斜杠需写成 `\\` |
+| `port` | 调试端口，默认 9333；被占用自动顺延 9334-9350 |
+
+优先级：环境变量 `ZCODE_PLUS_ZCODE_PATH` > 配置文件 `zcodePath` > 自动探测。配置了 `zcodePath` 但路径无效时会明确报错，不会静默回退。
+
 ## 排错
 
 | 现象 | 处理 |
 |---|---|
+| 提示"未找到 ZCode.exe" | 按弹窗指引编辑安装目录下 `zcode-plus-config.json`，把 `zcodePath` 填为 ZCode.exe 完整路径（推荐正斜杠，如 `E:/zcode/ZCode.exe`），保存后重试 |
 | 按钮不出现 | 确认从「ZCode+」入口启动（原版无 CDP 通道无注入）；等待 2-3 秒 |
 | 增强失败 | 右键按钮 → 设置 → 复制错误信息到社区反馈 |
 | 查看日志 | 控制台启动 `ZCodePlus.exe controller.mjs`；日志在安装目录 `zcode-plus.log` |
