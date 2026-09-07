@@ -52,7 +52,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
 
   // ---- 设置（仅模式与手动连接配置；自动凭据由控制器运行时读取，不落页面）----
   function defaultSettings() {
-    return { mode: "auto", enhanceMode: "workbuddy", customTemplate: "", baseUrl: "", apiKey: "", model: "", protocol: "chat", omitStore: false };
+    return { mode: "auto", enhanceMode: "workbuddy", customTemplate: "", baseUrl: "", apiKey: "", model: "", protocol: "chat", omitStore: false, thinking: { enabled: false, effort: "medium" } };
   }
   function loadSettings() {
     const base = defaultSettings();
@@ -70,6 +70,10 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         model: typeof p.model === "string" ? p.model.trim() : base.model,
         protocol: ["responses", "chat", "anthropic"].includes(p.protocol) ? p.protocol : base.protocol,
         omitStore: p.omitStore === true,
+        thinking: p.thinking && typeof p.thinking === "object" ? {
+          enabled: p.thinking.enabled === true,
+          effort: ["low", "medium", "high"].includes(p.thinking.effort) ? p.thinking.effort : "medium",
+        } : base.thinking,
       };
     } catch { return base; }
   }
@@ -103,15 +107,17 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         .filter((p) => /^[A-Za-z]:[\\/]/.test(p));
     } catch { return []; }
   }
-  function controllerRequest(type, extra = {}) {
+  function controllerRequest(type, extra = {}, manualOverride) {
     if (typeof window.__wbEnhance !== "function") {
       return Promise.reject(new Error("ZCode+ 控制器未连接：请从「ZCode+」快捷方式启动"));
     }
     const id = ++requestSeq;
     const s = loadSettings();
-    const manual = s.mode === "manual"
-      ? { baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model, protocol: s.protocol, omitStore: s.omitStore }
-      : null;
+    // manualOverride：设置面板传入表单当前值（未保存即生效）；null 表示显式走自动模式
+    const manual = manualOverride !== undefined ? manualOverride
+      : s.mode === "manual"
+        ? { baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model, protocol: s.protocol, omitStore: s.omitStore }
+        : null;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingRequests.delete(id);
@@ -119,7 +125,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
       }, REQUEST_TIMEOUT_MS);
       pendingRequests.set(id, { resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
       try {
-        window.__wbEnhance(JSON.stringify({ type, id, manual, modelLabel: readModelLabel(), workspacePaths: readWorkspacePaths(), ...extra }));
+        window.__wbEnhance(JSON.stringify({ type, id, manual, thinking: s.thinking, modelLabel: readModelLabel(), workspacePaths: readWorkspacePaths(), ...extra }));
       } catch (error) {
         pendingRequests.delete(id);
         clearTimeout(timer);
@@ -715,6 +721,15 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         </div>
         <datalist id="wb-model-list"></datalist>
         <label class="wb-check"><input data-wb="omitStore" type="checkbox" /><span>Responses 兼容：省略 store（保存策略由服务端决定）</span></label>
+        <label class="wb-check"><input data-wb="thinkingEnabled" type="checkbox" /><span>模型思考模式（推理更深但更慢；自动/手动连接均生效）</span></label>
+        <div class="wb-fields">
+        <label for="wb-thinking-effort">思考强度</label>
+        <select id="wb-thinking-effort" data-wb="thinkingEffort" disabled>
+          <option value="low">低（快速）</option>
+          <option value="medium">中（均衡）</option>
+          <option value="high">高（深入）</option>
+        </select>
+        </div>
         <div class="wb-row">
           <button data-wb="readZcode" type="button">读取 ZCode 配置</button>
           <button data-wb="testConn" type="button">测试连接</button>
@@ -784,6 +799,9 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     q("model").value = s.model;
     q("protocol").value = s.protocol;
     q("omitStore").checked = s.omitStore;
+    q("thinkingEnabled").checked = s.thinking.enabled;
+    q("thinkingEffort").value = s.thinking.effort;
+    q("thinkingEffort").disabled = !s.thinking.enabled;
     q("errorDetail").textContent = lastDiagnostic;
     function close() {
       overlay.remove();
@@ -798,6 +816,15 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         baseUrl: q("baseUrl").value.trim(), apiKey: q("apiKey").value.trim(),
         model: q("model").value.trim(), protocol: q("protocol").value,
         omitStore: q("omitStore").checked,
+        thinking: { enabled: q("thinkingEnabled").checked, effort: q("thinkingEffort").value },
+      };
+    }
+    // 拉取模型/测试连接用表单当前值实时请求，无需先保存
+    function formManual() {
+      if (q("auto").checked) return null;
+      return {
+        baseUrl: q("baseUrl").value.trim(), apiKey: q("apiKey").value.trim(),
+        model: q("model").value.trim(), protocol: q("protocol").value, omitStore: q("omitStore").checked,
       };
     }
     const TEMPLATE_EXAMPLE = `你是提示词增强助手。把下面的用户草稿改写成一个更清晰、更具体、更可执行的请求，交给下游编程助手使用。
@@ -845,7 +872,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
           q("protocol").value = cfg.protocol || "chat";
           q("status").textContent = `已读取当前模型：${cfg.model}\n供应商 ${cfg.providerId}；凭据来源 ${cfg.keySource}（不保存）`;
         } else if (action === "models") {
-          const result = await controllerRequest("models");
+          const result = await controllerRequest("models", {}, formManual());
           const list = overlay.querySelector("#wb-model-list");
           list.replaceChildren();
           for (const id of result.models || []) {
@@ -855,7 +882,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
           }
           q("status").textContent = (result.models || []).length ? `已拉取 ${(result.models || []).length} 个模型` : "服务返回空模型列表";
         } else {
-          const result = await controllerRequest("test");
+          const result = await controllerRequest("test", {}, formManual());
           q("status").textContent = result.message || "连接成功";
         }
       } catch (error) {
@@ -873,6 +900,9 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
     q("readZcode").addEventListener("click", () => void run("read"));
     q("fetchModels").addEventListener("click", () => void run("models"));
     q("testConn").addEventListener("click", () => void run("test"));
+    q("thinkingEnabled").addEventListener("change", () => {
+      q("thinkingEffort").disabled = !q("thinkingEnabled").checked;
+    });
     q("auto").addEventListener("change", () => {
       updateMode();
       q("status").textContent = "";
@@ -894,6 +924,9 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
       q("model").value = d.model;
       q("protocol").value = d.protocol;
       q("omitStore").checked = d.omitStore;
+      q("thinkingEnabled").checked = d.thinking.enabled;
+      q("thinkingEffort").value = d.thinking.effort;
+      q("thinkingEffort").disabled = !d.thinking.enabled;
       updateMode();
       syncTemplateSection();
       q("status").dataset.error = "0";

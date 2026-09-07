@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 // 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
-const CONTROLLER_VERSION = "1.2.2";
+const CONTROLLER_VERSION = "1.2.3";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
@@ -448,13 +448,14 @@ function resolveAutoConfig(modelLabel, workspacePaths) {
   if (!model) throw new Error(`供应商 ${providerId} 未配置模型，请使用手动模式`);
   return { mode: "auto", providerId, baseUrl, apiKey, model, protocol, keySource, headers: prov.options?.headers || {}, poolTag };
 }
-function resolveRequestConfig(manual, workspacePaths) {
+function resolveRequestConfig(manual, workspacePaths, { requireModel = true } = {}) {
   if (manual && (manual.baseUrl || manual.apiKey)) {
     const baseUrl = normalizeBase(manual.baseUrl || "");
     const apiKey = String(manual.apiKey || "").trim();
     const model = String(manual.model || "").trim();
     const protocol = ["responses", "chat", "anthropic"].includes(manual.protocol) ? manual.protocol : "chat";
-    if (!apiKey || !model || !baseUrl) throw new Error("请填写 Base URL、API Key 和模型");
+    // 拉取模型列表时模型名常未填（列表就是用来选模型的），此时不强制
+    if (!apiKey || !baseUrl || (requireModel && !model)) throw new Error("请填写 Base URL、API Key 和模型");
     return { mode: "manual", baseUrl, apiKey, model, protocol, omitStore: manual.omitStore === true, headers: {} };
   }
   return resolveAutoConfig(manual?.modelLabel || "", workspacePaths);
@@ -489,7 +490,23 @@ function parseOutputText(data) {
   }
   return "";
 }
-async function callLLM(cfg, draft, enhanceMode, customTemplate) {
+// 思考参数：按协议映射。chat 同时带 OpenAI 风格 reasoning_effort 与 GLM 风格 thinking
+// （多余字段主流兼容层会忽略）；GLM 系列思考默认开启，关闭需显式 thinking disabled。
+// thinking 未传（旧版页面运行时）时完全不带思考字段，保持服务默认行为
+function thinkingParams(thinking, protocol, model) {
+  if (thinking == null) return {};
+  const glmLike = /glm/i.test(String(model || ""));
+  if (thinking.enabled !== true) {
+    return glmLike && protocol === "chat" ? { thinking: { type: "disabled" } } : {};
+  }
+  const effort = ["low", "medium", "high"].includes(thinking.effort) ? thinking.effort : "medium";
+  if (protocol === "anthropic") return { thinking: { type: "enabled", budget_tokens: effort === "low" ? 2048 : effort === "high" ? 16000 : 8192 } };
+  if (protocol === "responses") return { reasoning: { effort } };
+  const params = { reasoning_effort: effort };
+  if (glmLike) params.thinking = { type: "enabled" };
+  return params;
+}
+async function callLLM(cfg, draft, enhanceMode, customTemplate, thinking) {
   const { system, user } = renderPrompt(draft, enhanceMode === "custom" ? "custom" : enhanceMode === "creative" ? "creative" : "workbuddy", customTemplate);
   let url, headers, body;
   // 透传 provider 自定义请求头（如 AgentRouter 的浏览器伪装头）；key 不落在自定义头里
@@ -503,7 +520,7 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate) {
       "anthropic-version": "2023-06-01",
       ...extraHeaders,
     };
-    body = { model: cfg.model, max_tokens: 16384, system, messages: [{ role: "user", content: user }] };
+    body = { model: cfg.model, max_tokens: 16384, system, messages: [{ role: "user", content: user }], ...thinkingParams(thinking, cfg.protocol, cfg.model) };
   } else if (cfg.protocol === "responses") {
     url = joinEndpoint(cfg.baseUrl, "/responses");
     headers = { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}`, ...extraHeaders };
@@ -511,6 +528,7 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate) {
       model: cfg.model, instructions: system, input: user,
       // GLM-5.2 的兼容层不接受 store；其它模型默认请求不存储。
       ...((cfg.omitStore || /^(?:[^/]+\/)?glm-5\.2(?:$|[-:])/i.test(cfg.model)) ? {} : { store: false }),
+      ...thinkingParams(thinking, cfg.protocol, cfg.model),
     };
   } else {
     url = joinEndpoint(cfg.baseUrl, "/chat/completions");
@@ -518,6 +536,7 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate) {
     body = {
       model: cfg.model,
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      ...thinkingParams(thinking, cfg.protocol, cfg.model),
     };
   }
   let res;
@@ -658,11 +677,11 @@ async function handleBinding(cdp, sessionId, payload) {
   try { msg = JSON.parse(payload); } catch { return; }
   const id = msg.id;
   if (!Number.isFinite(id)) return;
-  const resolve = () => resolveRequestConfig(msg.manual ? { ...msg.manual, modelLabel: msg.modelLabel } : { modelLabel: msg.modelLabel }, msg.workspacePaths);
+  const resolve = (opts) => resolveRequestConfig(msg.manual ? { ...msg.manual, modelLabel: msg.modelLabel } : { modelLabel: msg.modelLabel }, msg.workspacePaths, opts);
   try {
     if (msg.type === "enhance") {
       const cfg = resolve();
-      const text = await callLLM(cfg, String(msg.draft || ""), msg.enhanceMode, msg.customTemplate);
+      const text = await callLLM(cfg, String(msg.draft || ""), msg.enhanceMode, msg.customTemplate, msg.thinking);
       await cdp.reply(sessionId, id, { ok: true, text });
     } else if (msg.type === "insertText") {
       // 页面回填富文本编辑器的受信输入通道：先受信 Ctrl+A 全选再插入，镜像真实用户操作。
@@ -675,16 +694,19 @@ async function handleBinding(cdp, sessionId, payload) {
       await cdp.send("Input.insertText", { text }, sessionId);
       await cdp.reply(sessionId, id, { ok: true });
     } else if (msg.type === "models") {
-      const cfg = resolve();
+      // 模型名此时常未填（列表就是用来选模型的），不强制
+      const cfg = resolve({ requireModel: false });
       const models = await fetchModelList(cfg);
       await cdp.reply(sessionId, id, { ok: true, models });
     } else if (msg.type === "test") {
-      const cfg = resolve();
+      const cfg = resolve({ requireModel: false });
       const models = await fetchModelList(cfg);
-      const listed = models.includes(cfg.model);
+      const listed = cfg.model && models.includes(cfg.model);
       await cdp.reply(sessionId, id, { ok: true, message: listed
         ? `连接成功，目录包含 ${cfg.model}（未验证生成）`
-        : `连接成功，目录未列出 ${cfg.model}（未验证生成）` });
+        : cfg.model
+          ? `连接成功，目录未列出 ${cfg.model}（未验证生成）`
+          : `连接成功，已拉取 ${models.length} 个模型（未验证生成）` });
     } else if (msg.type === "readConfig") {
       const cfg = resolveAutoConfig(msg.modelLabel || "", msg.workspacePaths);
       // 只回传非敏感字段；Key 不出进程
