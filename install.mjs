@@ -13,9 +13,13 @@ import path from "node:path";
 import os from "node:os";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { decodePng, invert, resize, encodePng, packIcns } from "./make-icon.mjs";
 
 const SRC = path.dirname(fileURLToPath(import.meta.url));
 const IS_MAC = process.platform === "darwin";
+// 版本号唯一来源是 controller.mjs 的 CONTROLLER_VERSION（与 build-exe.mjs 同源）
+const VERSION = fs.readFileSync(path.join(SRC, "controller.mjs"), "utf8")
+  .match(/const CONTROLLER_VERSION = "([^"]+)"/)?.[1] || "0.0.0";
 const DEST = IS_MAC
   ? path.join(os.homedir(), "Library", "Application Support", "ZCodePlus")
   : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ZCodePlus");
@@ -65,11 +69,85 @@ function findZcode() {
   }
   return null;
 }
-// macOS 双击启动器：经 Terminal 打开（登录 shell，PATH 含 node）；桌面版指向安装目录
+// macOS 双击启动器：经 Terminal 打开（登录 shell，PATH 含 node）；前台排错用
 function writeMacLauncher(file, targetDir) {
   const script = `#!/bin/bash\n# ZCode+ 启动器（macOS）\ncd "${targetDir.replace(/"/g, '\\"')}"\nexec node controller.mjs\n`;
   fs.writeFileSync(file, script, "utf8");
   fs.chmodSync(file, 0o755);
+}
+// macOS：生成 ZCode+.app 应用包（LSUIElement 后台型：自身无 Dock 图标无窗口，点击即拉起控制器）
+// 图标优先用 ZCode 原版图标像素级反色（与 Windows 同源逻辑）；失败回退原版 icns
+function buildIcns(sourcePng) {
+  const { rgba, width, height } = decodePng(sourcePng);
+  invert(rgba);
+  const types = [["ic07", 128], ["ic08", 256], ["ic09", 512], ["ic10", 1024]]
+    .filter(([, size]) => size <= Math.max(width, height)); // 不放大超过源尺寸
+  return packIcns(types.map(([type, size]) => ({ type, png: encodePng(resize(rgba, width, height, size, size), size, size) })));
+}
+function macAppBundleDir(zcodePath) {
+  if (/\.app\/?$/i.test(zcodePath)) return zcodePath;
+  const m = String(zcodePath).match(/^(.*?\.app)\//);
+  return m ? m[1] : null; // 配置填的是内部可执行文件路径时向上找 .app 根
+}
+function buildMacApp(appDir, { targetDir, nodeBin, version, iconPng, iconIcns }) {
+  fs.rmSync(appDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(appDir, "Contents", "MacOS"), { recursive: true });
+  fs.mkdirSync(path.join(appDir, "Contents", "Resources"), { recursive: true });
+  // 启动器：优先安装时烘焙的 node 绝对路径；失效回退 PATH 与常见安装位置（Finder 启动无登录 shell PATH）
+  const q = (s) => String(s).replace(/"/g, '\\"');
+  const launcher = [
+    "#!/bin/bash",
+    "# ZCode+ 启动器（macOS 应用包）",
+    `NODE_BIN="${q(nodeBin)}"`,
+    'if [ ! -x "$NODE_BIN" ]; then',
+    '  NODE_BIN="$(command -v node || true)"',
+    '  [ -x "$NODE_BIN" ] || NODE_BIN="$(ls -1 /opt/homebrew/bin/node /usr/local/bin/node 2>/dev/null | head -1)"',
+    "fi",
+    'if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then',
+    `  osascript -e 'display dialog "未找到 node（可能已升级或卸载），请重跑 node install.mjs 重新生成 ZCode+.app" with title "ZCode+" buttons ["好"] default button "好" with icon caution' >/dev/null 2>&1`,
+    "  exit 1",
+    "fi",
+    // 后台拉起控制器后本进程立即退出：否则 Launch Services 认为应用常驻，
+    // 后续点击 .app/Dock 只向本进程发激活事件而不再启动，窗口聚焦逻辑失效。
+    // 控制器自身有单实例锁：重复点击 → 锁命中 → 激活已运行的 ZCode+ 后退出。
+    `"$NODE_BIN" "${q(targetDir)}/controller.mjs" &`,
+    "exit 0",
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(appDir, "Contents", "MacOS", "ZCode+"), launcher);
+  fs.chmodSync(path.join(appDir, "Contents", "MacOS", "ZCode+"), 0o755);
+  let iconOk = false;
+  if (iconPng && fs.existsSync(iconPng)) {
+    try {
+      fs.writeFileSync(path.join(appDir, "Contents", "Resources", "app.icns"), buildIcns(iconPng));
+      iconOk = true;
+    } catch (error) {
+      console.log("[提示] 反色图标生成失败，回退 ZCode 原版图标：" + String(error?.message || error));
+    }
+  }
+  if (!iconOk && iconIcns && fs.existsSync(iconIcns)) {
+    fs.copyFileSync(iconIcns, path.join(appDir, "Contents", "Resources", "app.icns"));
+    iconOk = true;
+  }
+  let plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>ZCode+</string>
+  <key>CFBundleDisplayName</key><string>ZCode+</string>
+  <key>CFBundleIdentifier</key><string>com.zcodeplus.launcher</string>
+  <key>CFBundleExecutable</key><string>ZCode+</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleIconFile</key><string>app.icns</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict>
+</plist>
+`;
+  if (!iconOk) plist = plist.replace('  <key>CFBundleIconFile</key><string>app.icns</string>\n', "");
+  fs.writeFileSync(path.join(appDir, "Contents", "Info.plist"), plist);
 }
 function main() {
   // 1) node 检查
@@ -91,10 +169,23 @@ function main() {
   for (const file of files) {
     fs.copyFileSync(path.join(SRC, file), path.join(DEST, file));
   }
-  // 3) 平台专属：Windows 生成图标 + 快捷方式；macOS 生成 .command 启动器
+  // 3) 平台专属：Windows 生成图标 + 快捷方式；macOS 生成 .command 排错入口 + ZCode+.app 应用包
   if (IS_MAC) {
-    writeMacLauncher(path.join(DEST, "ZCode+.command"), DEST);
-    writeMacLauncher(path.join(DESKTOP, "ZCode+.command"), DEST);
+    writeMacLauncher(path.join(DEST, "ZCode+.command"), DEST); // 前台排错入口（Terminal 可见日志）
+    const bundle = macAppBundleDir(zcodePath);
+    const res = bundle ? path.join(bundle, "Contents", "Resources") : null;
+    const appDir = path.join(os.homedir(), "Applications", "ZCode+.app");
+    buildMacApp(appDir, {
+      targetDir: DEST,
+      nodeBin: process.execPath,
+      version: VERSION,
+      iconPng: res ? path.join(res, "icon.png") : null,
+      iconIcns: res ? path.join(res, "icon.icns") : null,
+    });
+    // 桌面入口 = .app 副本（覆盖旧版 .command 入口）
+    fs.rmSync(path.join(DESKTOP, "ZCode+.command"), { force: true });
+    fs.rmSync(path.join(DESKTOP, "ZCode+.app"), { recursive: true, force: true });
+    fs.cpSync(appDir, path.join(DESKTOP, "ZCode+.app"), { recursive: true });
   } else {
     // 生成图标（从 ZCode 原版图标像素级反色：白底黑 Z；源缺失时沿用已生成的 ico）
     const zcodeIcon = path.join(path.dirname(zcodePath), "resources", "icon.png");
@@ -143,7 +234,8 @@ Write-Output 'shortcut created'
   console.log("");
   console.log("[完成] ZCode+ 安装到 " + DEST);
   if (IS_MAC) {
-    console.log("  - 桌面入口：ZCode+.command（双击启动；Terminal 窗口保持到 ZCode+ 退出）");
+    console.log("  - 桌面入口：ZCode+.app（双击启动 ZCode+，无终端窗口；可拖入 Dock 常驻）");
+    console.log("  - 应用入口：~/Applications/ZCode+.app（启动台可见）");
     console.log("  - ZCode 路径：" + zcodePath);
   } else {
     console.log("  - 桌面快捷方式：ZCode+（独立图标，原 ZCode 快捷方式不受影响）");

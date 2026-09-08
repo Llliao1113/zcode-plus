@@ -20,6 +20,7 @@ const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 const CONTROLLER_VERSION = "1.3.0";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
+const LOCK_FILE = path.join(INSTALL_DIR, ".zcode-plus.lock");
 const REQUEST_TIMEOUT_MS = 90000;
 const CDP_BOOT_TIMEOUT_MS = 30000;
 const PORT_RANGE = [9333, 9350];
@@ -271,6 +272,34 @@ function renderPrompt(draft, enhanceMode, customTemplate) {
 }
 
 // ---- 端口与进程管理 ----
+// 单实例锁：同一安装目录只允许一个控制器常驻。重复点击入口时若控制器还活着，
+// 聚焦已运行的 ZCode+ 后退出——否则两条 CDP 通道同时收 binding 会双重增强/双重回填。
+// 返回值：null=已持锁可继续；数字=持锁的存活 pid（调用方应退出）
+function acquireSingleInstanceLock() {
+  try {
+    const pid = Number(readJson(LOCK_FILE));
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      process.kill(pid, 0); // 不抛 = 进程存活；ESRCH = 已死
+      return pid;
+    }
+  } catch (error) {
+    if (error?.code === "EPERM") return -1; // 进程存在但无权限探测：按存活处理
+    // ESRCH / 文件不存在 / 内容损坏：锁已失效，继续抢占
+  }
+  try { fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch {}
+  const release = () => {
+    try { if (String(readJson(LOCK_FILE)) === String(process.pid)) fs.rmSync(LOCK_FILE, { force: true }); } catch {}
+  };
+  process.on("exit", release);
+  // 信号默认终止不保证触发 exit 事件：显式转 process.exit 走清理
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => process.exit(0));
+  return null;
+}
+// macOS：把已运行的 ZCode+ 窗口带到前台（新入口点击用户预期是「打开窗口」）
+function activateZcodeApp() {
+  if (!IS_MAC) return;
+  try { execFileSync("osascript", ["-e", 'tell application "ZCode" to activate'], { timeout: 5000, stdio: "ignore" }); } catch {}
+}
 function portInUse(port) {
   return new Promise((resolve) => {
     const srv = createServer();
@@ -812,6 +841,13 @@ function ensureDesktopShortcut() {
 
 // ---- 主流程 ----
 async function main() {
+  // 0) 单实例：控制器已在跑 → 聚焦 ZCode+ 窗口后退出（不重复建 CDP 通道）
+  const lockOwner = acquireSingleInstanceLock();
+  if (lockOwner !== null) {
+    log(`已有 ZCode+ 控制器在运行 (pid=${lockOwner})，激活窗口后本次启动退出`);
+    activateZcodeApp();
+    process.exit(0);
+  }
   let found = findZcodePath();
   if (found.error || !found.path) {
     // 探测失败：引导用户在配置文件中手动填写 zcodePath（编辑保存后自动重试一次）

@@ -40,8 +40,8 @@
 ZCode 桌面版是 Electron 应用，UI 为 Chromium 渲染的 Web DOM，但没有官方用户脚本或扩展机制。ZCode+ 通过 Chrome DevTools Protocol 实现非侵入注入：
 
 ```
-桌面「ZCode+」入口（Windows: vbs 无窗口启动；macOS: ZCode+.command 双击启动）
-   └→ 本地控制器（常驻 Node 进程，凭据仅存于此）
+桌面「ZCode+」入口（Windows: 快捷方式/vbs 无窗口启动；macOS: ZCode+.app 双击启动，可驻 Dock）
+   └→ 本地控制器（常驻 Node 进程，凭据仅存于此；单实例锁，重复点击只聚焦已运行的 ZCode+）
         ├─ 分配空闲调试端口（默认 9333，占用自动顺延 9334-9350，启动前 bind 检测）
         ├─ 以 --remote-debugging-port 拉起 ZCode（Windows: ZCode.exe；macOS: ZCode.app；不改安装目录、不碰签名）
         ├─ CDP 向页面注入增强脚本（页面刷新/新窗口自动重注入）
@@ -93,12 +93,15 @@ node install.mjs        # 部署到 %LOCALAPPDATA%\ZCodePlus 并创建桌面快�
 ```bash
 git clone <本仓库地址>
 cd zcode-plus
-node install.mjs        # 部署到 ~/Library/Application Support/ZCodePlus，桌面生成「ZCode+.command」
+node install.mjs        # 部署到 ~/Library/Application Support/ZCodePlus
 ```
 
-- 双击桌面 **「ZCode+.command」** 启动（Terminal 窗口保持到 ZCode+ 退出属正常现象）
+安装后获得真正的应用入口（无终端窗口，图标为 ZCode 原版反色：白底黑 Z）：
+
+- **桌面「ZCode+.app」** 与 **`~/Applications/ZCode+.app`**（启动台可见）：双击即启动 ZCode+ 并自动注入，可拖入 Dock 常驻
+- 重复点击入口不会重复注入：控制器单实例锁，只把已运行的 ZCode+ 窗口带到前台
 - 自动探测 `/Applications`、`~/Applications` 与 Spotlight 索引中的 `ZCode.app`；失败时弹窗引导编辑 `zcode-plus-config.json`（支持 `.app` 包路径或内部可执行文件路径）
-- 前台调试模式：`node controller.mjs`
+- 前台调试模式：`node controller.mjs`，或运行安装目录内 `ZCode+.command`（Terminal 可见日志）
 
 ## 使用
 
@@ -131,6 +134,8 @@ node install.mjs        # 部署到 ~/Library/Application Support/ZCodePlus，�
 | 按钮不出现 | 确认从「ZCode+」入口启动（原版无 CDP 通道无注入）；等待 2-3 秒 |
 | 增强失败 | 右键按钮 → 设置 → 复制错误信息到社区反馈 |
 | 查看日志 | Windows 控制台启动 `ZCodePlus.exe controller.mjs`，macOS 运行安装目录 `ZCode+.command`（前台）或 `node controller.mjs`；日志在安装目录 `zcode-plus.log` |
+| macOS 重复点击 ZCode+.app | 正常：单实例锁生效，仅聚焦已运行的 ZCode+ 窗口，不重复注入 |
+| macOS 提示未找到 node | node 升级/移动后重跑 `node install.mjs` 重新生成 ZCode+.app（启动器内烘焙 node 路径） |
 | 端口冲突 | 自动顺延 9334-9350；全占用则启动失败并写日志 |
 | ZCode 大版本更新后按钮消失 | 页面结构可能变化，更新本仓库 inject.js 后重启 |
 
