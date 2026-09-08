@@ -39,6 +39,10 @@ function ensureOfficialNode() {
 }
 
 function main() {
+  if (process.platform !== "win32") {
+    console.error("[跳过] build-exe.mjs 仅构建 Windows 发行包；macOS 用 node install.mjs 源码部署即可。");
+    process.exit(1);
+  }
   // inject.js 版本必须来自控制器注入（面板显示），不允许再硬编码数字版本
   if (/"1\.\d+\.\d+"/.test(fs.readFileSync(path.join(ROOT, "inject.js"), "utf8"))) {
     throw new Error("inject.js 仍含硬编码版本号（应读 __zcodePlusControllerVersion），构建中止");

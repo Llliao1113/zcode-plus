@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /*
 ZCode+ 安装器：
-- 复制 controller / inject / launcher / start 到 %LOCALAPPDATA%\ZCodePlus
-- 生成独立图标与桌面快捷方式「ZCode+」（不改动原 ZCode 快捷方式）
-- 探测并写入 ZCode.exe 路径与端口偏好
+- Windows：复制 controller / inject / launcher / start 到 %LOCALAPPDATA%\ZCodePlus，
+  生成独立图标与桌面快捷方式「ZCode+」（不改动原 ZCode 快捷方式）
+- macOS：复制 controller / inject 到 ~/Library/Application Support/ZCodePlus，
+  生成可双击的「ZCode+.command」启动器（安装目录 + 桌面）
+- 探测并写入 ZCode 路径与端口偏好
 重复运行 = 覆盖更新（不影响已保存的页面设置）。
 */
 import fs from "node:fs";
@@ -13,7 +15,10 @@ import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SRC = path.dirname(fileURLToPath(import.meta.url));
-const DEST = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ZCodePlus");
+const IS_MAC = process.platform === "darwin";
+const DEST = IS_MAC
+  ? path.join(os.homedir(), "Library", "Application Support", "ZCodePlus")
+  : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ZCodePlus");
 const DESKTOP = path.join(os.homedir(), "Desktop");
 
 function listDriveRoots() {
@@ -24,8 +29,24 @@ function listDriveRoots() {
   }
   return roots;
 }
+// macOS：ZCode 桌面版是 .app 包，存 .app 路径即可（controller 会解析到内部可执行文件）
+function findZcodeMac() {
+  const candidates = [
+    "/Applications/ZCode.app",
+    path.join(os.homedir(), "Applications", "ZCode.app"),
+  ];
+  try {
+    const out = execSync(`mdfind "kMDItemFSName == 'ZCode.app'"`, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+    candidates.push(...out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 10));
+  } catch {}
+  for (const p of candidates) {
+    try { if (fs.statSync(p).isDirectory()) return p; } catch {}
+  }
+  return null;
+}
 // 与 controller.mjs 的探测链保持一致：不硬编码本机路径
 function findZcode() {
+  if (IS_MAC) return findZcodeMac();
   const candidates = [
     path.join(SRC, "ZCode.exe"),
     "C:\\Program Files\\ZCode\\ZCode.exe",
@@ -44,6 +65,12 @@ function findZcode() {
   }
   return null;
 }
+// macOS 双击启动器：经 Terminal 打开（登录 shell，PATH 含 node）；桌面版指向安装目录
+function writeMacLauncher(file, targetDir) {
+  const script = `#!/bin/bash\n# ZCode+ 启动器（macOS）\ncd "${targetDir.replace(/"/g, '\\"')}"\nexec node controller.mjs\n`;
+  fs.writeFileSync(file, script, "utf8");
+  fs.chmodSync(file, 0o755);
+}
 function main() {
   // 1) node 检查
   try { execSync("node -v", { stdio: "pipe" }); }
@@ -53,38 +80,51 @@ function main() {
   }
   const zcodePath = process.argv[2] || findZcode();
   if (!zcodePath || !fs.existsSync(zcodePath)) {
-    console.error("[错误] 未找到 ZCode.exe。用法：node install.mjs <ZCode.exe 完整路径>");
-    console.error("       已尝试：源码目录、各盘符 zcode 目录、标准安装位置、PATH。");
+    console.error(`[错误] 未找到 ZCode${IS_MAC ? " 应用（ZCode.app）" : ".exe"}。`
+      + (IS_MAC ? "用法：node install.mjs <ZCode.app 路径>" : "用法：node install.mjs <ZCode.exe 完整路径>"));
+    console.error(IS_MAC ? "       已尝试：/Applications、~/Applications、Spotlight。" : "       已尝试：源码目录、各盘符 zcode 目录、标准安装位置、PATH。");
     process.exit(1);
   }
   // 2) 复制文件
   fs.mkdirSync(DEST, { recursive: true });
-  for (const file of ["controller.mjs", "inject.js", "launcher.vbs", "start-zcode-plus.bat"]) {
+  const files = IS_MAC ? ["controller.mjs", "inject.js"] : ["controller.mjs", "inject.js", "launcher.vbs", "start-zcode-plus.bat"];
+  for (const file of files) {
     fs.copyFileSync(path.join(SRC, file), path.join(DEST, file));
   }
-  // 3) 生成图标（从 ZCode 原版图标像素级反色：白底黑 Z；源缺失时沿用已生成的 ico）
-  const zcodeIcon = path.join(path.dirname(zcodePath), "resources", "icon.png");
-  if (fs.existsSync(zcodeIcon)) {
-    execSync(`node "${path.join(SRC, "make-icon.mjs")}" "${zcodeIcon}"`, { stdio: "inherit" });
+  // 3) 平台专属：Windows 生成图标 + 快捷方式；macOS 生成 .command 启动器
+  if (IS_MAC) {
+    writeMacLauncher(path.join(DEST, "ZCode+.command"), DEST);
+    writeMacLauncher(path.join(DESKTOP, "ZCode+.command"), DEST);
   } else {
-    console.log("[提示] 未找到 ZCode 原版图标 " + zcodeIcon + "，沿用已有 ZCodePlus.ico");
+    // 生成图标（从 ZCode 原版图标像素级反色：白底黑 Z；源缺失时沿用已生成的 ico）
+    const zcodeIcon = path.join(path.dirname(zcodePath), "resources", "icon.png");
+    if (fs.existsSync(zcodeIcon)) {
+      execSync(`node "${path.join(SRC, "make-icon.mjs")}" "${zcodeIcon}"`, { stdio: "inherit" });
+    } else {
+      console.log("[提示] 未找到 ZCode 原版图标 " + zcodeIcon + "，沿用已有 ZCodePlus.ico");
+    }
+    fs.copyFileSync(path.join(SRC, "ZCodePlus.ico"), path.join(DEST, "ZCodePlus.ico"));
   }
-  fs.copyFileSync(path.join(SRC, "ZCodePlus.ico"), path.join(DEST, "ZCodePlus.ico"));
   // 4) 配置（探测/手动指定的 zcodePath 落盘，controller 启动时直接使用；zcodePath 留空则启动时重新探测）
   const config = {
     _readme: [
       "ZCode+ 配置文件(JSON 格式，不支持注释)",
-      "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
-      "推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；用反斜杠则必须写成双反斜杠。",
+      IS_MAC
+        ? 'zcodePath：ZCode 桌面版路径；留空 "" 表示自动探测。支持 .app 包（如 "/Applications/ZCode.app"）或内部可执行文件。'
+        : 'zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 "" 表示自动探测。',
+      IS_MAC
+        ? null
+        : '推荐用正斜杠，例如 "E:/zcode/ZCode.exe"；用反斜杠则必须写成双反斜杠。',
       "port：调试端口，默认 9333；被占用时自动顺延(9334-9350)。",
-    ],
+    ].filter(Boolean),
     zcodePath,
     port: 9333,
     installedAt: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(DEST, "zcode-plus-config.json"), JSON.stringify(config, null, 2));
-  // 5) 桌面快捷方式 ZCode+（独立图标，不动原 ZCode 快捷方式）
-  const ps = `
+  // 5) 桌面入口：Windows 用 .lnk 快捷方式，macOS 用 .command（上方已生成）
+  if (!IS_MAC) {
+    const ps = `
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut('${DESKTOP.replace(/\\/g, "\\") + "\\\\ZCode+.lnk"}')
 $lnk.TargetPath = 'C:\\\\Windows\\\\System32\\\\wscript.exe'
@@ -95,16 +135,22 @@ $lnk.Description = 'ZCode+ 提示词增强版'
 $lnk.Save()
 Write-Output 'shortcut created'
 `.trim();
-  fs.writeFileSync(path.join(SRC, "install-shortcut.ps1"), ps);
-  execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(SRC, "install-shortcut.ps1")}"`, { stdio: "inherit" });
-  fs.rmSync(path.join(SRC, "install-shortcut.ps1"), { force: true });
+    fs.writeFileSync(path.join(SRC, "install-shortcut.ps1"), ps);
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(SRC, "install-shortcut.ps1")}"`, { stdio: "inherit" });
+    fs.rmSync(path.join(SRC, "install-shortcut.ps1"), { force: true });
+  }
 
   console.log("");
   console.log("[完成] ZCode+ 安装到 " + DEST);
-  console.log("  - 桌面快捷方式：ZCode+（独立图标，原 ZCode 快捷方式不受影响）");
-  console.log("  - ZCode 路径：" + zcodePath);
+  if (IS_MAC) {
+    console.log("  - 桌面入口：ZCode+.command（双击启动；Terminal 窗口保持到 ZCode+ 退出）");
+    console.log("  - ZCode 路径：" + zcodePath);
+  } else {
+    console.log("  - 桌面快捷方式：ZCode+（独立图标，原 ZCode 快捷方式不受影响）");
+    console.log("  - ZCode 路径：" + zcodePath);
+  }
   console.log("  - 调试端口：9333（被占用时自动顺延到 9334-9350）");
-  console.log("  - 排错：运行 " + path.join(DEST, "start-zcode-plus.bat") + " 查看控制台；日志见 zcode-plus.log");
+  console.log("  - 排错：运行 " + (IS_MAC ? path.join(DEST, "ZCode+.command") : path.join(DEST, "start-zcode-plus.bat")) + " 查看控制台；日志见 zcode-plus.log");
   console.log("  - 注意：ZCode 为单实例应用，原版与 ZCode+ 不能同时运行；");
   console.log("    若原版在运行，ZCode+ 会询问是否关闭原版后重启。");
 }

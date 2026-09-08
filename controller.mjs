@@ -7,7 +7,7 @@ ZCode+ 提示词增强控制器（社区移植，非 ZCode 官方产品）
 - 凭据只存在于本进程内存：不写盘、不进日志、不回传页面
 */
 
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,12 +17,13 @@ import { fileURLToPath } from "node:url";
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 // 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
-const CONTROLLER_VERSION = "1.2.4";
+const CONTROLLER_VERSION = "1.3.0";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
 const CDP_BOOT_TIMEOUT_MS = 30000;
 const PORT_RANGE = [9333, 9350];
+const IS_MAC = process.platform === "darwin";
 
 // 首次运行生成默认配置文件：自动探测失败时用户可在此手动填写 ZCode 路径
 function ensureDefaultConfig() {
@@ -30,9 +31,15 @@ function ensureDefaultConfig() {
   const config = {
     _readme: [
       "ZCode+ 配置文件(JSON 格式，不支持注释)",
-      "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
-      "自动探测失败时在此填写，推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；",
-      "用反斜杠则必须写成双反斜杠，例如 \"E:\\\\zcode\\\\ZCode.exe\"。",
+      IS_MAC
+        ? "zcodePath：ZCode 桌面版路径；留空 \"\" 表示自动探测。"
+        : "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
+      IS_MAC
+        ? "自动探测失败时在此填写，支持 .app 包（如 \"/Applications/ZCode.app\"）"
+        : "自动探测失败时在此填写，推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；",
+      IS_MAC
+        ? "或内部可执行文件（如 \"/Applications/ZCode.app/Contents/MacOS/ZCode\"）。"
+        : "用反斜杠则必须写成双反斜杠，例如 \"E:\\\\zcode\\\\ZCode.exe\"。",
       "port：调试端口，默认 9333；被占用时自动顺延(9334-9350)。",
     ],
     zcodePath: "",
@@ -60,41 +67,73 @@ function listDriveRoots() {
 function isFile(p) {
   try { return fs.statSync(p).isFile(); } catch { return false; }
 }
+// macOS 允许直接填 .app 包路径：自动解析到内部可执行文件（CFBundleExecutable，读取失败缺省 ZCode）
+function resolveZcodeExecutable(p) {
+  if (!IS_MAC || !/\.app\/?$/i.test(String(p))) return p;
+  try {
+    if (!fs.statSync(p).isDirectory()) return p;
+    let name = "ZCode";
+    try {
+      // Info.plist 可能是二进制格式：正则不命中即退回缺省名，不视为错误
+      const plist = fs.readFileSync(path.join(p, "Contents", "Info.plist"), "utf8");
+      const m = plist.match(/<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/);
+      if (m) name = m[1];
+    } catch {}
+    const inner = path.join(p, "Contents", "MacOS", name);
+    return isFile(inner) ? inner : p;
+  } catch { return p; }
+}
 // 分发场景不硬编码安装路径：显式配置优先，其次多来源探测
 function findZcodePath() {
   // 1) 显式配置（环境变量 > 配置文件）：意图明确，路径无效时直接报错，不静默回退
   const configured = configuredZcodePath();
   if (configured) {
-    if (isFile(configured)) return { path: configured, source: "手动配置" };
-    return { path: null, error: `配置的 zcodePath 无效（该路径不是可用的 ZCode.exe）：${configured}` };
+    const resolved = resolveZcodeExecutable(configured);
+    if (isFile(resolved)) return { path: resolved, source: "手动配置" };
+    return { path: null, error: `配置的 zcodePath 无效（该路径不是可用的 ZCode${IS_MAC ? " 应用" : ".exe"}）：${configured}` };
   }
   const candidates = [];
   const add = (p, source) => { if (p) candidates.push({ p, source }); };
   // 2) ZCode+ 所在目录及逐级向上：覆盖「把 ZCode+ 放进 ZCode 安装目录或其子目录」
   let cur = INSTALL_DIR;
   for (let depth = 0; depth < 6 && cur; depth++) {
-    add(path.join(cur, "ZCode.exe"), "ZCode+ 所在位置");
+    if (IS_MAC) add(path.join(cur, "ZCode.app", "Contents", "MacOS", "ZCode"), "ZCode+ 所在位置");
+    else add(path.join(cur, "ZCode.exe"), "ZCode+ 所在位置");
     const parent = path.dirname(cur);
     if (parent === cur) break;
     cur = parent;
   }
-  // 3) 各盘符根下的常见目录名（Windows 路径不区分大小写，一种写法即可）：覆盖自定义盘自定义目录安装（如 E:\zcode）
-  for (const root of listDriveRoots()) {
-    add(path.join(root, "zcode", "ZCode.exe"), "盘符常见位置");
+  if (IS_MAC) {
+    // 3) macOS 标准安装位置
+    add(path.join("/Applications", "ZCode.app"), "标准安装位置");
+    add(path.join(os.homedir(), "Applications", "ZCode.app"), "标准安装位置");
+    // 4) Spotlight 索引：覆盖自定义位置安装（含外接盘）；索引未覆盖时不命中，无害
+    try {
+      const out = execSync(`mdfind "kMDItemFSName == 'ZCode.app'"`, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+      for (const line of out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 10)) add(line, "Spotlight");
+    } catch {}
+  } else {
+    // 3) 各盘符根下的常见目录名（Windows 路径不区分大小写，一种写法即可）：覆盖自定义盘自定义目录安装（如 E:\zcode）
+    for (const root of listDriveRoots()) {
+      add(path.join(root, "zcode", "ZCode.exe"), "盘符常见位置");
+    }
+    // 4) Windows 标准安装位置
+    add("C:\\Program Files\\ZCode\\ZCode.exe", "标准安装位置");
+    add("C:\\Program Files (x86)\\ZCode\\ZCode.exe", "标准安装位置");
+    add(path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"), "标准安装位置");
+    // 5) PATH 中的 ZCode.exe（PATH 含失效网络路径时 where 可能变慢，限 5 秒）
+    try {
+      const out = execSync("where ZCode.exe", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+      add(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0], "PATH");
+    } catch {}
   }
-  // 4) Windows 标准安装位置
-  add("C:\\Program Files\\ZCode\\ZCode.exe", "标准安装位置");
-  add("C:\\Program Files (x86)\\ZCode\\ZCode.exe", "标准安装位置");
-  add(path.join(os.homedir(), "AppData", "Local", "Programs", "ZCode", "ZCode.exe"), "标准安装位置");
-  // 5) PATH 中的 ZCode.exe（PATH 含失效网络路径时 where 可能变慢，限 5 秒）
-  try {
-    const out = execSync("where ZCode.exe", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
-    add(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0], "PATH");
-  } catch {}
   const tried = [];
   for (const { p, source } of candidates) {
     tried.push(p);
-    try { if (isFile(p)) return { path: p, source, tried }; } catch {}
+    try {
+      const resolved = resolveZcodeExecutable(p);
+      if (isFile(resolved)) return { path: resolved, source, tried };
+    } catch {}
   }
   return { path: null, tried };
 }
@@ -278,23 +317,44 @@ async function isZcodeBrowser(port) {
 }
 function zcodeProcessesRunning() {
   try {
+    if (IS_MAC) {
+      execSync("pgrep -x ZCode", { stdio: "ignore", timeout: 5000 });
+      return true;
+    }
     const out = execSync('tasklist /fi "IMAGENAME eq ZCode.exe" /fo csv /nh', { encoding: "utf8" });
     return /ZCode\.exe/i.test(out);
   } catch { return false; }
 }
-// 弹窗文本走 base64（UTF-16LE）：规避中文/换行/引号在 cmd→PowerShell 间的多层转义
+// Windows 弹窗文本走 base64（UTF-16LE）：规避中文/换行/引号在 cmd→PowerShell 间的多层转义
+// macOS 走 osascript display dialog：参数用 execFileSync 数组传递，不做 shell 转义
 function showMessageBox(text, buttons = "OK") {
+  if (IS_MAC) {
+    const yesNo = /yes/i.test(buttons);
+    // AppleScript 字符串字面量不含原生换行：按行拆开用 linefeed 连接
+    const literal = String(text).split("\n")
+      .map((line) => '"' + line.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"')
+      .join(" & linefeed & ");
+    const btns = yesNo ? '"否", "是"' : '"好"';
+    const script = `display dialog ${literal} with title "ZCode+" `
+      + `buttons [${btns}] default button ${yesNo ? '"是"' : '"好"'} with icon caution`;
+    try { return execFileSync("osascript", ["-e", script], { encoding: "utf8", timeout: 120000 }).trim(); }
+    catch { return ""; } // 用户按 Esc 取消 / 超时
+  }
   const b64 = Buffer.from(text, "utf16le").toString("base64");
   const cmd = `powershell -NoProfile -Command "$t=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}')); Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($t,'ZCode+','${buttons}','Warning')"`;
   try { return execSync(cmd, { encoding: "utf8", timeout: 120000 }).trim(); }
   catch { return ""; }
 }
+// 弹窗「确认」语义的返回值：macOS osascript 输出形如 "button returned:是"
+function messageBoxConfirmed(result) {
+  return IS_MAC ? result.includes("button returned:是") : result.includes("Yes");
+}
 async function askCloseOriginal() {
   // 询问是否关闭正在运行的原版 ZCode（用户可能丢未发送草稿，必须显式确认）
-  return showMessageBox(
+  return messageBoxConfirmed(showMessageBox(
     "ZCode 原版正在运行，ZCode+ 需要独占启动。是否关闭原版并以 ZCode+ 重启？",
     "YesNo",
-  ).includes("Yes");
+  ));
 }
 function launchZcode(port, zcodePath) {
   const child = spawn(zcodePath, [`--remote-debugging-port=${port}`], {
@@ -305,7 +365,7 @@ function launchZcode(port, zcodePath) {
   child.once("error", (error) => {
     log(`拉起 ZCode 失败: ${safeError(error)}（zcodePath=${zcodePath}）`);
     showMessageBox(
-      `拉起 ZCode 失败：${safeError(error)}\n\n请检查配置中的 zcodePath 是否指向 ZCode.exe：\n${CONFIG_FILE}`,
+      `拉起 ZCode 失败：${safeError(error)}\n\n请检查配置中的 zcodePath 是否指向 ZCode${IS_MAC ? " 应用" : ".exe"}：\n${CONFIG_FILE}`,
       "OK",
     );
     process.exit(1);
@@ -684,13 +744,15 @@ async function handleBinding(cdp, sessionId, payload) {
       const text = await callLLM(cfg, String(msg.draft || ""), msg.enhanceMode, msg.customTemplate, msg.thinking);
       await cdp.reply(sessionId, id, { ok: true, text });
     } else if (msg.type === "insertText") {
-      // 页面回填富文本编辑器的受信输入通道：先受信 Ctrl+A 全选再插入，镜像真实用户操作。
+      // 页面回填富文本编辑器的受信输入通道：先受信全选按键再插入，镜像真实用户操作。
       // ZCode 3.11+ 的 Lexical 输入框对程序化选区/合成事件不认账（会丢弃或按内部选区追加），
       // 只有受信按键走真实输入管线才可靠；本分支不读取任何配置
       const text = String(msg.text ?? "");
       if (!text || text.length > 100000) throw new Error("无效的 insertText 请求");
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 }, sessionId);
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 }, sessionId);
+      // 全选修饰键：macOS 为 Cmd（modifiers 4），Windows 为 Ctrl（2）；Chromium 修饰键位掩码 Alt=1/Ctrl=2/Meta=4/Shift=8
+      const modifiers = IS_MAC ? 4 : 2;
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers }, sessionId);
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers }, sessionId);
       await cdp.send("Input.insertText", { text }, sessionId);
       await cdp.reply(sessionId, id, { ok: true });
     } else if (msg.type === "models") {
@@ -722,8 +784,9 @@ async function handleBinding(cdp, sessionId, payload) {
   }
 }
 
-// exe（SEA）模式首次运行自动创建桌面快捷方式；node 模式由 install.mjs 创建
+// exe（SEA）模式首次运行自动创建桌面快捷方式；node 模式由 install.mjs 创建（仅 Windows 发行形态）
 function ensureDesktopShortcut() {
+  if (process.platform !== "win32") return;
   let isSea = false;
   try { isSea = require("node:sea").isSea(); } catch {}
   if (!isSea) return;
@@ -752,18 +815,23 @@ async function main() {
   let found = findZcodePath();
   if (found.error || !found.path) {
     // 探测失败：引导用户在配置文件中手动填写 zcodePath（编辑保存后自动重试一次）
-    log(found.error || `未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`);
+    log(found.error || `未找到 ZCode，已尝试：${found.tried.join("; ")}`);
     const guide = found.error
       ? found.error
-      : `自动探测未找到 ZCode.exe（已尝试 ZCode+ 所在位置、各盘符常见目录、标准安装位置、PATH）。`;
+      : `自动探测未找到 ZCode${IS_MAC ? " 应用（ZCode.app）" : ".exe"}`
+        + `（已尝试 ZCode+ 所在位置、${IS_MAC ? "标准安装位置、Spotlight" : "各盘符常见目录、标准安装位置、PATH"}）。`;
+    const example = IS_MAC ? '"zcodePath": "/Applications/ZCode.app"' : '"zcodePath": "E:/zcode/ZCode.exe"';
     const choice = showMessageBox(
       guide + `\n\n请在配置文件中手动填写 zcodePath：\n${CONFIG_FILE}\n\n`
-        + `示例（推荐正斜杠，反斜杠需写成双反斜杠）：\n"zcodePath": "E:/zcode/ZCode.exe"\n\n`
-        + `是否现在用记事本打开配置文件编辑？（保存后 ZCode+ 自动重试）`,
+        + `示例：\n${example}\n\n`
+        + `是否现在用${IS_MAC ? "文本编辑" : "记事本"}打开配置文件编辑？（保存后 ZCode+ 自动重试）`,
       "YesNo",
     );
-    if (choice.includes("Yes")) {
-      try { spawn("notepad.exe", [CONFIG_FILE], { detached: true, stdio: "ignore" }).unref(); } catch {}
+    if (messageBoxConfirmed(choice)) {
+      try {
+        if (IS_MAC) spawn("open", ["-t", CONFIG_FILE], { detached: true, stdio: "ignore" }).unref();
+        else spawn("notepad.exe", [CONFIG_FILE], { detached: true, stdio: "ignore" }).unref();
+      } catch {}
       // 轮询等待（最长 3 分钟）：路径有效即提前继续；用户已保存但路径仍无效/留空也提前结束
       // （Win11 记事本可能把文件并入已有窗口进程，不能依赖其进程生命周期）
       let mtimeBefore = 0;
@@ -779,10 +847,10 @@ async function main() {
     }
   }
   if (found.error || !found.path) {
-    const detail = found.error || `仍未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`;
+    const detail = found.error || `仍未找到 ZCode${IS_MAC ? " 应用" : ".exe"}，已尝试：${found.tried.join("; ")}`;
     log(detail);
     showMessageBox(
-      `启动失败：${found.error || "未找到 ZCode.exe。"}\n\n`
+      `启动失败：${found.error || `未找到 ZCode${IS_MAC ? " 应用" : ".exe"}。`}\n\n`
         + `请在配置文件中检查 zcodePath 后重新运行：\n${CONFIG_FILE}\n\n日志：${LOG_FILE}`,
       "OK",
     );
@@ -804,7 +872,10 @@ async function main() {
       log("用户拒绝关闭原版 ZCode，退出");
       process.exit(0);
     }
-    try { execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" }); } catch {}
+    try {
+      if (IS_MAC) execSync("pkill -x ZCode", { stdio: "ignore", timeout: 5000 });
+      else execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" });
+    } catch {}
     await new Promise((r) => setTimeout(r, 2500));
   }
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
