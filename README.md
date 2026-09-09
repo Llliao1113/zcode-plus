@@ -5,7 +5,7 @@
 **为 ZCode 桌面版注入一键式提示词增强（Prompt Enhancement）**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform: Windows | Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue.svg)]()
+[![Platform: Windows | Linux | macOS](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
 [![Dependencies: Zero](https://img.shields.io/badge/Dependencies-Zero-green.svg)]()
 
 在输入框旁注入一颗星芒按钮 ✨ —— 点击把当前草稿发给模型，改写得更清晰后回填，检查后发送，支持撤销。
@@ -40,13 +40,13 @@
 ZCode 桌面版是 Electron 应用，UI 为 Chromium 渲染的 Web DOM，但没有官方用户脚本或扩展机制。ZCode+ 通过 Chrome DevTools Protocol 实现非侵入注入：
 
 ```
-桌面「ZCode+」入口（vbs 无窗口启动）
-   └→ 本地控制器（常驻 Node 进程，凭据仅存于此）
+桌面「ZCode+」入口（Windows: 快捷方式/vbs 无窗口启动；Linux: .desktop 应用入口；macOS: ZCode+.app 双击启动，可驻 Dock）
+   └→ 本地控制器（常驻 Node 进程，凭据仅存于此；单实例锁，重复点击只聚焦已运行的 ZCode+）
         ├─ 分配空闲调试端口（默认 9333，占用自动顺延 9334-9350，启动前 bind 检测）
-        ├─ 以 --remote-debugging-port 拉起 ZCode.exe（不改安装目录、不碰签名）
+        ├─ 以 --remote-debugging-port 拉起 ZCode（Windows: ZCode.exe；Linux: /opt/ZCode/zcode；macOS: ZCode.app；不改安装目录、不碰签名）
         ├─ CDP 向页面注入增强脚本（页面刷新/新窗口自动重注入）
         ├─ 页面脚本经 Runtime binding 发送当前草稿 → 控制器调用模型 → 回传
-        └─ 页面回填（回填前校验草稿未变，改稿/切任务时结果保留不覆盖）
+        └─ 页面回填（受信全选按键 Windows Ctrl+A / macOS Cmd+A；回填前校验草稿未变，改稿/切任务时结果保留不覆盖）
 ```
 
 关键设计：
@@ -111,6 +111,23 @@ node controller.mjs     # 需本机已装 Node 18+（推荐 22+）
 
 WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux 侧的 127.0.0.1 互通：ZCode+ 已内置平台判别，Windows 控制器只附着 Windows 实例、Linux 控制器只附着 Linux 实例，两侧同时启动互不干扰；端口冲突时自动顺延（9334-9350）。
 
+### macOS（从源码运行）
+
+前置条件：已安装 ZCode 桌面版 + [Node.js](https://nodejs.org) 18+（推荐 22+）。
+
+```bash
+git clone <本仓库地址>
+cd zcode-plus
+node install.mjs        # 部署到 ~/Library/Application Support/ZCodePlus
+```
+
+安装后获得真正的应用入口（无终端窗口，图标为 ZCode 原版反色：白底黑 Z）：
+
+- **桌面「ZCode+.app」** 与 **`~/Applications/ZCode+.app`**（启动台可见）：双击即启动 ZCode+ 并自动注入，可拖入 Dock 常驻
+- 重复点击入口不会重复注入：控制器单实例锁，只把已运行的 ZCode+ 窗口带到前台
+- 自动探测 `/Applications`、`~/Applications` 与 Spotlight 索引中的 `ZCode.app`；失败时弹窗引导编辑 `zcode-plus-config.json`（支持 `.app` 包路径或内部可执行文件路径）
+- 前台调试模式：`node controller.mjs`，或运行安装目录内 `ZCode+.command`（Terminal 可见日志）
+
 ## 使用
 
 1. 通过「ZCode+」入口启动（原版 ZCode 运行中会弹窗询问是否重启）
@@ -129,7 +146,7 @@ WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux
 
 | 字段 | 说明 |
 |---|---|
-| `zcodePath` | ZCode.exe 完整路径；留空 `""` 表示自动探测；推荐正斜杠写法 `E:/zcode/ZCode.exe`，反斜杠需写成 `\\` |
+| `zcodePath` | ZCode 路径；留空 `""` 表示自动探测。Windows 填 `ZCode.exe` 完整路径（推荐正斜杠 `E:/zcode/ZCode.exe`，反斜杠需 `\\`）；Linux 填 `/opt/ZCode/zcode`；macOS 填 `.app` 包（如 `/Applications/ZCode.app`）或内部可执行文件 |
 | `port` | 调试端口，默认 9333；被占用自动顺延 9334-9350 |
 
 优先级：环境变量 `ZCODE_PLUS_ZCODE_PATH` > 配置文件 `zcodePath` > 自动探测。配置了 `zcodePath` 但路径无效时会明确报错，不会静默回退。
@@ -138,10 +155,12 @@ WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux
 
 | 现象 | 处理 |
 |---|---|
-| 提示"未找到 ZCode.exe" | 按弹窗指引编辑安装目录下 `zcode-plus-config.json`，把 `zcodePath` 填为 ZCode.exe 完整路径（推荐正斜杠，如 `E:/zcode/ZCode.exe`），保存后重试 |
+| 提示"未找到 ZCode"（Windows: ZCode.exe / Linux: zcode / macOS: ZCode.app） | 按弹窗指引编辑安装目录下 `zcode-plus-config.json`，把 `zcodePath` 填为 ZCode 路径（Windows 示例 `E:/zcode/ZCode.exe`；Linux 示例 `/opt/ZCode/zcode`；macOS 示例 `/Applications/ZCode.app`），保存后重试 |
 | 按钮不出现 | 确认从「ZCode+」入口启动（原版无 CDP 通道无注入）；等待 2-3 秒 |
 | 增强失败 | 右键按钮 → 设置 → 复制错误信息到社区反馈 |
-| 查看日志 | 控制台启动 `ZCodePlus.exe controller.mjs`；日志在安装目录 `zcode-plus.log` |
+| 查看日志 | Windows 控制台启动 `ZCodePlus.exe controller.mjs`，Linux 前台运行 `./zcode-plus.sh`，macOS 运行安装目录 `ZCode+.command`（前台）或 `node controller.mjs`；日志在安装目录 `zcode-plus.log` |
+| macOS 重复点击 ZCode+.app | 正常：单实例锁生效，仅聚焦已运行的 ZCode+ 窗口，不重复注入 |
+| macOS 提示未找到 node | node 升级/移动后重跑 `node install.mjs` 重新生成 ZCode+.app（启动器内烘焙 node 路径） |
 | 端口冲突 | 自动顺延 9334-9350；全占用则启动失败并写日志 |
 | ZCode 大版本更新后按钮消失 | 页面结构可能变化，更新本仓库 inject.js 后重启 |
 
@@ -155,9 +174,11 @@ WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux
 ## 构建
 
 ```bash
-node build-exe.mjs    # 生成 dist/ZCodePlus-vX.Y.Z.zip（内嵌官方 Node 的发行包）
-node make-icon.mjs    # 从 ZCode 原版图标像素级反色生成 ZCode+ 图标
+node build-exe.mjs    # Windows 上运行：生成 win-x64.zip（本地）+ linux-x64.tar.gz（委托 WSL）双发行包
+node make-icon.mjs    # 从 ZCode 原版图标像素级反色生成 ZCode+ 图标（Windows ico；mac icns 由 install.mjs 生成）
 ```
+
+macOS 无需打包：`node install.mjs` 源码部署即可（发行包形态目前为 Windows / Linux）。
 
 ## 许可证与免责声明
 

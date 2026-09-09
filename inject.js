@@ -223,7 +223,7 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         sel.addRange(range);
       };
       let done = false;
-      // 通道1：控制器受信输入。控制器先发受信 Ctrl+A 全选再插入，镜像真实用户操作。
+      // 通道1：控制器受信输入。控制器先发受信全选按键（macOS Cmd+A / Windows Ctrl+A）再插入，镜像真实用户操作。
       // ZCode 3.11+ 的 Lexical 输入框对程序化选区与合成事件不认账（丢弃 execCommand、
       // 回滚直接 DOM 改写、粘贴按内部选区追加），受信按键走真实输入管线才可靠
       if (typeof window.__wbEnhance === "function") {

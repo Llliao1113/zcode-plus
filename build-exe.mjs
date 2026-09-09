@@ -37,6 +37,12 @@ function ensureOfficialNode() {
 }
 
 function main() {
+  if (process.platform !== "win32") {
+    // 本脚本在 Windows 上是双平台构建入口（win 包本地构建 + 委托 WSL 构建 linux 包）；
+    // macOS 用 node install.mjs 源码部署，Linux 机器上可直接运行 build-linux.sh
+    console.error("[跳过] build-exe.mjs 需在 Windows 上运行（win 包本地构建 + WSL 委托 linux 包）；macOS 用 node install.mjs 源码部署，Linux 可直接运行 build-linux.sh。");
+    process.exit(1);
+  }
   // inject.js 版本必须来自控制器注入（面板显示），不允许再硬编码数字版本
   if (/"1\.\d+\.\d+"/.test(fs.readFileSync(path.join(ROOT, "inject.js"), "utf8"))) {
     throw new Error("inject.js 仍含硬编码版本号（应读 __zcodePlusControllerVersion），构建中止");

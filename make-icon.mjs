@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /*
 ZCode+ 图标生成器：读取 ZCode 原版图标（黑底白 Z 圆角方形），像素级反色生成
-白底黑 Z 版本，缩放打包为多尺寸 ICO。纯 Node（zlib），无第三方依赖。
-用法：node make-icon.mjs [源图标.png]   （默认 D:/Zcode/resources/icon.png）
+白底黑 Z 版本，缩放打包为多尺寸 ICO（Windows）/ ICNS（macOS）。纯 Node（zlib），无第三方依赖。
+用法（CLI）：node make-icon.mjs [源图标.png]   （默认 D:/Zcode/resources/icon.png，产物 ZCodePlus.ico）
+模块导入：install.mjs 复用 decodePng/invert/resize/encodePng/packIco/packIcns 生成 mac 应用图标
 */
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(SCRIPT_DIR, "ZCodePlus.ico");
@@ -179,6 +180,24 @@ function packIco(pngs) {
   return Buffer.concat([header, dir, ...pngs]);
 }
 
+// ---- ICNS 打包（macOS，PNG 内嵌；现代类型，10.7+ 系统均支持）----
+// sizes 显式传 { type, size } 列表：由调用方按源图尺寸决定放哪些（不放大超过源尺寸）
+function packIcns(entries) {
+  const parts = [];
+  for (const { type, png } of entries) {
+    const entry = Buffer.alloc(8 + png.length);
+    entry.write(type, 0, "ascii");
+    entry.writeUInt32BE(8 + png.length, 4);
+    png.copy(entry, 8);
+    parts.push(entry);
+  }
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(8);
+  header.write("icns", 0, "ascii");
+  header.writeUInt32BE(8 + body.length, 4);
+  return Buffer.concat([header, body]);
+}
+
 function main() {
   const { rgba, width, height } = decodePng(SOURCE);
   // 角点采样报告：确认圆角外是否透明（不透明则反色后是白色直角，需提醒）
@@ -193,4 +212,9 @@ function main() {
     console.log(`注意：源图四角 alpha 最大值 ${maxCorner}（非全透明），图标可能呈方形而非圆角显示`);
   }
 }
-main();
+
+// CLI 直跑才生成 ico；被 import 时不执行（install.mjs 复用函数生成 mac 图标）
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
+export { decodePng, invert, resize, encodePng, packIco, packIcns };
