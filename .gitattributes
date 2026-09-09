@@ -1,0 +1,5 @@
+# 平台脚本换行符约束：Linux 脚本必须 LF（CRLF 会破坏 shebang 导致 bad interpreter），
+# Windows 专用脚本必须 CRLF；其余文件交给 core.autocrlf 默认行为
+*.sh text eol=lf
+*.bat text eol=crlf
+*.vbs text eol=crlf

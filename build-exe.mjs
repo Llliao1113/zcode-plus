@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 /*
-ZCode+ Windows 发行包构建（无第三方构建框架）
+ZCode+ 发行包构建（无第三方构建框架；Windows 包本地构建，Linux 包委托 WSL 执行 build-linux.sh）
 产物（dist/）：
-  ZCodePlus-Setup.exe   官方 node.exe 复制品，首参数跑 installer.mjs：把 payload 解包到 %LOCALAPPDATA%\ZCodePlus
-  ZCodePlus-vx.y.z.zip  常规发行 zip（setup exe + payload 文件），供 Release 附件
-原理：Windows 下 "Setup.exe payload.js" 与双击运行 Setup.exe 等价性不足（双击无参数），
-     因此 setup 自带「无参数时自动进入安装模式」的引导逻辑（installer.mjs 检测 SEA 不可用，
-     直接以 node 解析自身尾部附加的 payload —— 简化为：installer 引导由 zip 内文件结构承担）。
+  ZCodePlus-vx.y.z-win-x64.zip   Windows 发行包（Release 附件）
+  ZCodePlus-vx.y.z-linux-x64.tar.gz  Linux 发行包（Release 附件，含 install.sh）
 实际采用最稳妥形态（对用户零依赖、双击即用）：
-  dist/ZCodePlus/ 文件夹 + zip —— Setup.exe 仅是把文件夹部署到 LOCALAPPDATA 并建快捷方式的副本
+  dist/ZCodePlus-<ver>-win-x64/ 文件夹 + zip —— Setup.exe 仅是把文件夹部署到 LOCALAPPDATA 并建快捷方式的副本
+  Linux 包解压后 ./install.sh 安装或 ./zcode-plus.sh 直接运行
 用法：node build-exe.mjs
 */
 import fs from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +20,7 @@ const DIST = path.join(ROOT, "dist");
 const VERSION = fs.readFileSync(path.join(ROOT, "controller.mjs"), "utf8")
   .match(/const CONTROLLER_VERSION = "([^"]+)"/)?.[1];
 if (!VERSION) throw new Error("controller.mjs 中未找到 CONTROLLER_VERSION，构建中止");
-const APP_DIR = path.join(DIST, `ZCodePlus-${VERSION}`);
+const APP_DIR = path.join(DIST, `ZCodePlus-${VERSION}-win-x64`);
 const NODE_HOST_DIR = path.join(ROOT, "build", "node-host", "node-v24.15.0-win-x64");
 
 function sh(cmd) { execSync(cmd, { stdio: "inherit" }); }
@@ -65,11 +63,28 @@ function main() {
   fs.writeFileSync(path.join(APP_DIR, "启动 ZCode+.vbs"), vbsLines.join("\r\n") + "\r\n", "latin1");
   // 3) README 使用说明（简版，指向主 README）
   // 4) 打 zip（Windows 自带 tar 支持 zip? 用 PowerShell Compress-Archive 保证兼容）
-  const zipPath = path.join(DIST, `ZCodePlus-v${VERSION}.zip`);
+  const zipPath = path.join(DIST, `ZCodePlus-v${VERSION}-win-x64.zip`);
   sh(`powershell -NoProfile -Command "Compress-Archive -Path '${APP_DIR.replace(/'/g, "''")}\\*' -DestinationPath '${zipPath.replace(/'/g, "''")}' -Force"`);
   const size = (fs.statSync(zipPath).size / 1048576).toFixed(1);
   console.log(`构建完成：
   ${APP_DIR}\\ZCodePlus.exe（部署文件夹，双击「启动 ZCode+.vbs」或快捷方式使用）
   ${zipPath}（${size} MB，Release 附件）`);
+  buildLinuxPackage(VERSION);
+}
+
+// Linux 包：委托 WSL 内执行 build-linux.sh（同一份源码同一版本；无 WSL 的机器跳过，
+// 贡献者可在原生 Linux 上直接运行该脚本）
+function buildLinuxPackage(version) {
+  console.log("\n[linux] 尝试构建 Linux 发行包（经 WSL）…");
+  try {
+    const wslRoot = ROOT.replace(/^([A-Za-z]):[\\/]/, (_m, drive) => `/mnt/${drive.toLowerCase()}/`).replace(/\\/g, "/");
+    const r = spawnSync("wsl.exe", ["-e", "bash", path.posix.join(wslRoot, "build-linux.sh"), version], {
+      encoding: "utf8", timeout: 600000, stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (r.status === 0) return;
+    console.log(`[linux] 构建失败（status=${r.status}）：${String(r.stderr || r.stdout || "").slice(0, 400)}`);
+  } catch (error) {
+    console.log(`[linux] 无可用 WSL，跳过（可在 Linux 内直接运行 build-linux.sh）：${error?.message || error}`);
+  }
 }
 main();

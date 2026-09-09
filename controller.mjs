@@ -7,7 +7,7 @@ ZCode+ 提示词增强控制器（社区移植，非 ZCode 官方产品）
 - 凭据只存在于本进程内存：不写盘、不进日志、不回传页面
 */
 
-import { spawn, execSync } from "node:child_process";
+import { spawn, spawnSync, execSync } from "node:child_process";
 import { createServer } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,12 +17,18 @@ import { fileURLToPath } from "node:url";
 const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = path.join(INSTALL_DIR, "zcode-plus.log");
 // 版本单一来源：--version 输出与页面设置面板显示都取这里（build-exe.mjs 也从此解析）
-const CONTROLLER_VERSION = "1.2.4";
+const CONTROLLER_VERSION = "1.3.0";
 const ZCODE_HOME = process.env.ZCODE_HOME || path.join(os.homedir(), ".zcode");
 const CONFIG_FILE = path.join(INSTALL_DIR, "zcode-plus-config.json");
 const REQUEST_TIMEOUT_MS = 90000;
 const CDP_BOOT_TIMEOUT_MS = 30000;
 const PORT_RANGE = [9333, 9350];
+// 平台分支唯一入口：process.platform 判断只允许出现在此常量与各平台实现函数内
+// （防混审计不变式：grep IS_WIN 应只命中此处定义与平台函数内的分派点）
+// Linux 安装形态按 WSL2 实测：deb 包 zcode，真实二进制 /opt/ZCode/zcode，
+// /usr/bin/zcode 为 alternatives 符号链接，官方 desktop 入口 Exec 直接指向真实二进制
+const IS_WIN = process.platform === "win32";
+const ZCODE_BIN = IS_WIN ? "ZCode.exe" : "zcode";
 
 // 首次运行生成默认配置文件：自动探测失败时用户可在此手动填写 ZCode 路径
 function ensureDefaultConfig() {
@@ -30,9 +36,9 @@ function ensureDefaultConfig() {
   const config = {
     _readme: [
       "ZCode+ 配置文件(JSON 格式，不支持注释)",
-      "zcodePath：ZCode 桌面版 ZCode.exe 的完整路径；留空 \"\" 表示自动探测。",
-      "自动探测失败时在此填写，推荐用正斜杠，例如 \"E:/zcode/ZCode.exe\"；",
-      "用反斜杠则必须写成双反斜杠，例如 \"E:\\\\zcode\\\\ZCode.exe\"。",
+      "zcodePath：ZCode 桌面版可执行文件的完整路径；留空 \"\" 表示自动探测。",
+      "Windows 例：\"E:/zcode/ZCode.exe\"（反斜杠须写成双反斜杠）。",
+      "Linux 例：\"/opt/ZCode/zcode\"。",
       "port：调试端口，默认 9333；被占用时自动顺延(9334-9350)。",
     ],
     zcodePath: "",
@@ -60,16 +66,27 @@ function listDriveRoots() {
 function isFile(p) {
   try { return fs.statSync(p).isFile(); } catch { return false; }
 }
-// 分发场景不硬编码安装路径：显式配置优先，其次多来源探测
+// 分发场景不硬编码安装路径：显式配置优先，其次多来源探测（候选链按平台拆分，探测流程共享）
 function findZcodePath() {
   // 1) 显式配置（环境变量 > 配置文件）：意图明确，路径无效时直接报错，不静默回退
   const configured = configuredZcodePath();
   if (configured) {
     if (isFile(configured)) return { path: configured, source: "手动配置" };
-    return { path: null, error: `配置的 zcodePath 无效（该路径不是可用的 ZCode.exe）：${configured}` };
+    return { path: null, error: `配置的 zcodePath 无效（该路径不是可用的 ${ZCODE_BIN}）：${configured}` };
   }
   const candidates = [];
   const add = (p, source) => { if (p) candidates.push({ p, source }); };
+  if (IS_WIN) addZcodeCandidatesWin(add);
+  else addZcodeCandidatesLinux(add);
+  const tried = [];
+  for (const { p, source } of candidates) {
+    tried.push(p);
+    try { if (isFile(p)) return { path: p, source, tried }; } catch {}
+  }
+  return { path: null, tried };
+}
+// Windows 候选链
+function addZcodeCandidatesWin(add) {
   // 2) ZCode+ 所在目录及逐级向上：覆盖「把 ZCode+ 放进 ZCode 安装目录或其子目录」
   let cur = INSTALL_DIR;
   for (let depth = 0; depth < 6 && cur; depth++) {
@@ -91,12 +108,23 @@ function findZcodePath() {
     const out = execSync("where ZCode.exe", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
     add(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0], "PATH");
   } catch {}
-  const tried = [];
-  for (const { p, source } of candidates) {
-    tried.push(p);
-    try { if (isFile(p)) return { path: p, source, tried }; } catch {}
-  }
-  return { path: null, tried };
+}
+// Linux 候选链（WSL2 实测 deb 布局；Flatpak/snap 形态暂不覆盖，探测失败走手动配置）
+function addZcodeCandidatesLinux(add) {
+  // 2) PATH 中的 zcode（deb 提供 /usr/bin/zcode 符号链接）：优先解析到真实二进制，
+  //    与官方 desktop 入口 Exec 一致，cwd 也会落到 /opt/ZCode 资源目录
+  try {
+    const out = execSync("command -v zcode", { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+    const onPath = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+    if (onPath) {
+      try { add(fs.realpathSync(onPath), "PATH"); } catch {}
+      add(onPath, "PATH");
+    }
+  } catch {}
+  // 3) deb 标准安装位置 + 其他常见根
+  add("/opt/ZCode/zcode", "标准安装位置");
+  add("/usr/local/bin/zcode", "标准安装位置");
+  add(path.join(os.homedir(), ".local", "bin", "zcode"), "标准安装位置");
 }
 function portPreferred() {
   return Number(process.env.ZCODE_PLUS_PORT) || readJson(CONFIG_FILE)?.port || PORT_RANGE[0];
@@ -254,12 +282,22 @@ async function cdpVersion(port, timeoutMs = 3000) {
     return data && data.webSocketDebuggerUrl ? data : null;
   } catch { return null; }
 }
+// WSL2 镜像网络（networkingMode=mirrored）等场景下 127.0.0.1 可跨系统边界：
+// Linux 控制器能探测到 Windows 侧监听（反之亦然）。附着/就绪确认前必须校验
+// 目标 CDP 实例与本控制器同平台（按 User-Agent 判别），防止误连「另一系统」的
+// ZCode 并注入其正在使用的会话
+function cdpSamePlatform(version) {
+  const ua = String(version?.["User-Agent"] || "");
+  return IS_WIN ? /Windows NT/i.test(ua) : /Linux/i.test(ua);
+}
 async function findRunningZcodePlus() {
   // 已带调试端口的 ZCode+ 实例：直接附着，不重复拉起。
-  // 必须校验目标确为 ZCode（页面标题/URL 含 zcode），避免误连本机其他应用的 CDP 端口。
+  // 必须校验目标确为 ZCode（页面标题/URL 含 zcode）且与本控制器同平台，
+  // 避免误连本机其他应用的 CDP 端口或跨系统边界的另一侧实例
   for (let p = PORT_RANGE[0]; p <= PORT_RANGE[1]; p++) {
     const version = await cdpVersion(p);
     if (!version) continue;
+    if (!cdpSamePlatform(version)) continue;
     if (await isZcodeBrowser(p)) return { port: p, version };
   }
   return null;
@@ -278,17 +316,74 @@ async function isZcodeBrowser(port) {
 }
 function zcodeProcessesRunning() {
   try {
-    const out = execSync('tasklist /fi "IMAGENAME eq ZCode.exe" /fo csv /nh', { encoding: "utf8" });
-    return /ZCode\.exe/i.test(out);
+    if (IS_WIN) {
+      const out = execSync('tasklist /fi "IMAGENAME eq ZCode.exe" /fo csv /nh', { encoding: "utf8" });
+      return /ZCode\.exe/i.test(out);
+    }
+    // Linux：Electron 根进程名是 ZCode（产品名）、子进程是 zcode（二进制名），须双形态不区分大小写匹配；
+    // 且必须排除僵尸态（stat 以 Z 开头）——WSL 的 init 不收养孤儿，上一轮残留的僵尸进程
+    // 会被 pgrep 误报为「原版正在运行」，导致后续弹询问甚至拒绝启动
+    const out = execSync("ps -eo stat=,comm=", { encoding: "utf8", timeout: 5000 });
+    return out.split(/\r?\n/).some((line) => {
+      const t = line.trim().split(/\s+/);
+      return t.length === 2 && !t[0].startsWith("Z") && /^zcode$/i.test(t[1]);
+    });
   } catch { return false; }
 }
+function killZcodeProcesses() {
+  try {
+    if (IS_WIN) { execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" }); return; }
+    // 先 TERM 允许 Electron 正常收尾（等同用户点关闭），仍存活再强杀（taskkill /F 等价物）；
+    // -x -i 同时覆盖根进程 ZCode 与子进程 zcode（只杀小写会留下不收尸的根进程和僵尸残骸）
+    execSync("pkill -x -i zcode", { stdio: "ignore", timeout: 5000 });
+    if (zcodeProcessesRunning()) execSync("pkill -x -i -KILL zcode", { stdio: "ignore", timeout: 5000 });
+  } catch {}
+}
 // 弹窗文本走 base64（UTF-16LE）：规避中文/换行/引号在 cmd→PowerShell 间的多层转义
-function showMessageBox(text, buttons = "OK") {
+function showMessageBoxWin(text, buttons = "OK") {
   const b64 = Buffer.from(text, "utf16le").toString("base64");
   const cmd = `powershell -NoProfile -Command "$t=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}')); Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($t,'ZCode+','${buttons}','Warning')"`;
   try { return execSync(cmd, { encoding: "utf8", timeout: 120000 }).trim(); }
   catch { return ""; }
 }
+// Linux 弹窗链：zenity → kdialog → 终端问答 → stderr+日志（headless 无 TTY 时返回空串，调用方按安全默认处理）。
+// 返回值与 Windows 版对齐："Yes"/"No"/"OK"/""
+function showMessageBoxLinux(text, buttons = "OK") {
+  const isQuestion = /yesno/i.test(buttons);
+  const shQuote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const has = (tool) => {
+    try { execSync(`command -v ${tool}`, { stdio: ["ignore", "ignore", "ignore"], timeout: 3000 }); return true; }
+    catch { return false; }
+  };
+  const run = (cmd) => {
+    try { execSync(cmd, { stdio: ["ignore", "ignore", "ignore"], timeout: 120000 }); return 0; }
+    catch (error) { return error?.status ?? 1; }
+  };
+  if (has("zenity")) {
+    const exit = run(`zenity --title 'ZCode+' ${isQuestion ? "--question" : "--info --timeout 60"} --text ${shQuote(text)} --width 480`);
+    if (isQuestion) return exit === 0 ? "Yes" : "No";
+    return "OK";
+  }
+  if (has("kdialog")) {
+    const exit = run(`kdialog ${isQuestion ? "--yesno" : "--msgbox"} ${shQuote(text)} --title 'ZCode+'`);
+    if (isQuestion) return exit === 0 ? "Yes" : "No";
+    return "OK";
+  }
+  // 终端兜底：有 TTY 时控制台问答（默认 n，安全侧）；headless（桌面双击/后台）走 stderr 提示并返回空串
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    process.stdout.write(`\n[ZCode+] ${text}\n`);
+    if (!isQuestion) return "OK";
+    process.stdout.write("[ZCode+] (y/n，默认 n) ");
+    const buf = Buffer.alloc(16);
+    try {
+      const n = fs.readSync(0, buf, 0, 16);
+      return /^y/i.test(buf.toString("utf8", 0, n).trim()) ? "Yes" : "No";
+    } catch { return ""; }
+  }
+  process.stderr.write(`[ZCode+] ${text}\n`);
+  return "";
+}
+const showMessageBox = IS_WIN ? showMessageBoxWin : showMessageBoxLinux;
 async function askCloseOriginal() {
   // 询问是否关闭正在运行的原版 ZCode（用户可能丢未发送草稿，必须显式确认）
   return showMessageBox(
@@ -448,8 +543,18 @@ function resolveAutoConfig(modelLabel, workspacePaths) {
   if (!model) throw new Error(`供应商 ${providerId} 未配置模型，请使用手动模式`);
   return { mode: "auto", providerId, baseUrl, apiKey, model, protocol, keySource, headers: prov.options?.headers || {}, poolTag };
 }
-function resolveRequestConfig(manual, workspacePaths, { requireModel = true } = {}) {
-  if (manual && (manual.baseUrl || manual.apiKey)) {
+// 目录端点不可用（私有网关无 /models）时，从 provider 池读本地模型清单兜底
+function localProviderModels(providerId, pools) {
+  for (const pool of Array.isArray(pools) ? pools : []) {
+    const prov = pool.providers?.[providerId];
+    if (prov?.enabled !== false) {
+      const ids = Object.keys(prov?.models || {});
+      if (ids.length) return [...new Set(ids)].sort();
+    }
+  }
+  return [];
+}
+function resolveRequestConfig(manual, workspacePaths, { requireModel = true } = {}) {  if (manual && (manual.baseUrl || manual.apiKey)) {
     const baseUrl = normalizeBase(manual.baseUrl || "");
     const apiKey = String(manual.apiKey || "").trim();
     const model = String(manual.model || "").trim();
@@ -464,9 +569,14 @@ function resolveRequestConfig(manual, workspacePaths, { requireModel = true } = 
 // ---- LLM 调用（非流式；错误信息脱敏，不含请求正文与 Key）----
 function extractError(data) {
   const err = data?.error || data?.response?.error;
-  if (!err) return "";
-  const code = String(err.code || err.type || "").slice(0, 60);
-  const msg = String(err.message || "").slice(0, 120);
+  if (err) {
+    const code = String(err.code || err.type || "").slice(0, 60);
+    const msg = String(err.message || "").slice(0, 120);
+    return [code, msg].filter(Boolean).join(": ");
+  }
+  // 网关风格错误信封 {code, msg}（如 zcode 订阅网关 3007 captcha）
+  const code = data?.code != null ? String(data.code).slice(0, 60) : "";
+  const msg = String(data?.msg || "").slice(0, 120);
   return [code, msg].filter(Boolean).join(": ");
 }
 function parseOutputText(data) {
@@ -553,7 +663,13 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate, thinking) {
     throw new Error(/^\s*</.test(text) ? "响应解析失败：收到 HTML 而非 JSON，请检查服务地址" : "响应解析失败：内容不是有效 JSON");
   }
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}${extractError(data) ? "; " + extractError(data) : ""}`);
+    const detail = extractError(data);
+    // 反自动化网关（如 ZCode 内置订阅端点 3007 captcha）：设计上仅允许 ZCode 客户端自身调用，
+    // 第三方直连必被拒——这不是配置错误，给出可执行的指引而不是裸状态码
+    if (data?.code === 3007 || /captcha/i.test(String(data?.msg || ""))) {
+      throw new Error(`该服务网关带反自动化验证（${detail || `HTTP ${res.status}`}），拒绝 ZCode+ 直连。请右键 ✨ 按钮打开设置，取消「跟随 ZCode 当前模型」，改用手动模式（可直连的 Base URL + API Key）后重试`);
+    }
+    throw new Error(`HTTP ${res.status}${detail ? "; " + detail : ""}`);
   }
   if (data?.error) throw new Error(`生成失败：${extractError(data) || "服务返回错误"}`);
   const reason = data?.choices?.[0]?.finish_reason || data?.stop_reason;
@@ -576,10 +692,20 @@ async function fetchModelList(cfg) {
   const res = await fetchWithTimeout(url, { headers }, 15000);
   const text = await res.text();
   let data;
-  try { data = JSON.parse(text); } catch { throw new Error("模型目录返回的不是 JSON"); }
-  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+  try { data = JSON.parse(text); } catch {
+    // 网关无 /models 目录端点（私有/代理网关常见，返回 404 HTML 或 401 拒绝第三方直连）
+    throw Object.assign(new Error(res.status === 401 || res.status === 403
+      ? "模型目录不可用 (HTTP 401/403)：该服务密钥无权或拒绝第三方直连，请直接填写模型名"
+      : "模型目录不可用：该服务未提供 /models 端点，请直接填写模型名"), { status: res.status, noCatalog: true });
+  }
+  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}${extractError(data) ? "; " + extractError(data) : ""}`), { status: res.status, noCatalog: res.status === 401 || res.status === 403 || res.status === 404 });
   const values = Array.isArray(data) ? data : data?.data ?? data?.models ?? data?.items;
-  if (!Array.isArray(values)) throw new Error("模型列表格式无效");
+  // 成功状态码但信封里没有目录数据（错误信封 {code,msg} 等）：同属「该服务不提供模型目录」
+  if (!Array.isArray(values)) {
+    throw Object.assign(new Error(extractError(data)
+      ? `模型目录不可用（${extractError(data)}）：请直接填写模型名`
+      : "模型目录不可用：响应中没有模型列表，请直接填写模型名"), { noCatalog: true });
+  }
   return [...new Set(values.map((item) =>
     typeof item === "string" ? item : String(item?.id || item?.model || item?.name || "").trim(),
   ).filter(Boolean))].sort();
@@ -696,17 +822,43 @@ async function handleBinding(cdp, sessionId, payload) {
     } else if (msg.type === "models") {
       // 模型名此时常未填（列表就是用来选模型的），不强制
       const cfg = resolve({ requireModel: false });
-      const models = await fetchModelList(cfg);
+      let models;
+      try {
+        models = await fetchModelList(cfg);
+      } catch (error) {
+        // 目录端点不可用的自动模式：回退读 provider 本地模型清单（~/.zcode 配置里就有）
+        if (error?.noCatalog && cfg.mode === "auto") {
+          const pool = collectProviderPools(msg.workspacePaths);
+          const local = localProviderModels(cfg.providerId, pool);
+          if (local.length) models = local;
+          else throw error;
+        } else throw error;
+      }
       await cdp.reply(sessionId, id, { ok: true, models });
     } else if (msg.type === "test") {
       const cfg = resolve({ requireModel: false });
-      const models = await fetchModelList(cfg);
+      let models;
+      let catalogSkipped = false;
+      try {
+        models = await fetchModelList(cfg);
+      } catch (error) {
+        // 目录不可用不代表不可用：自动模式回退本地清单；手动模式提示改为「目录缺失但可继续」
+        if (error?.noCatalog && cfg.mode === "auto") {
+          const pool = collectProviderPools(msg.workspacePaths);
+          const local = localProviderModels(cfg.providerId, pool);
+          if (local.length) { models = local; catalogSkipped = true; }
+          else throw error;
+        } else if (error?.noCatalog && error?.status !== 401 && error?.status !== 403) {
+          await cdp.reply(sessionId, id, { ok: true, message: `连接成功（HTTP 已响应）${cfg.model ? "；" + cfg.model : ""}：该服务未提供模型目录，请确认模型名后保存（未实际验证生成）` });
+          return;
+        } else throw error;
+      }
       const listed = cfg.model && models.includes(cfg.model);
       await cdp.reply(sessionId, id, { ok: true, message: listed
-        ? `连接成功，目录包含 ${cfg.model}（未验证生成）`
+        ? `连接成功，目录包含 ${cfg.model}${catalogSkipped ? "（本地配置清单）" : ""}（未验证生成）`
         : cfg.model
-          ? `连接成功，目录未列出 ${cfg.model}（未验证生成）`
-          : `连接成功，已拉取 ${models.length} 个模型（未验证生成）` });
+          ? `连接成功，目录未列出 ${cfg.model}${catalogSkipped ? "（本地配置清单）" : ""}（未验证生成）`
+          : `连接成功，已拉取 ${models.length} 个模型${catalogSkipped ? "（本地配置清单）" : ""}（未验证生成）` });
     } else if (msg.type === "readConfig") {
       const cfg = resolveAutoConfig(msg.modelLabel || "", msg.workspacePaths);
       // 只回传非敏感字段；Key 不出进程
@@ -729,21 +881,44 @@ function ensureDesktopShortcut() {
   if (!isSea) return;
   const exe = process.execPath;
   const icon = path.join(INSTALL_DIR, "ZCodePlus.ico");
-  const lnk = path.join(os.homedir(), "Desktop", "ZCode+.lnk");
+  if (IS_WIN) {
+    const lnk = path.join(os.homedir(), "Desktop", "ZCode+.lnk");
+    try {
+      if (fs.existsSync(lnk)) return;
+      const ps = [
+        `$ws = New-Object -ComObject WScript.Shell`,
+        `$l = $ws.CreateShortcut('${lnk.replace(/'/g, "''")}')`,
+        `$l.TargetPath = '${exe.replace(/'/g, "''")}'`,
+        `${fs.existsSync(icon) ? `$l.IconLocation = '${icon.replace(/'/g, "''")}',0` : ""}`,
+        `$l.Description = 'ZCode+ Prompt Enhance'`,
+        `$l.Save()`,
+      ].filter(Boolean).join("; ");
+      execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '`"')}"`, { timeout: 30000 });
+      log("已创建桌面快捷方式 ZCode+");
+    } catch (error) {
+      log("创建桌面快捷方式失败（不影响使用）:", safeError(error));
+    }
+    return;
+  }
+  // Linux：.desktop 文件写入用户目录（WSLg 会自动集成进 Windows 开始菜单）。
+  // 控制台窗口下用 vte 唤起：detach 控制器与终端，ZCode+ 独立成窗
+  const desktopFile = path.join(os.homedir(), ".local", "share", "applications", "zcode-plus.desktop");
   try {
-    if (fs.existsSync(lnk)) return;
-    const ps = [
-      `$ws = New-Object -ComObject WScript.Shell`,
-      `$l = $ws.CreateShortcut('${lnk.replace(/'/g, "''")}')`,
-      `$l.TargetPath = '${exe.replace(/'/g, "''")}'`,
-      `${fs.existsSync(icon) ? `$l.IconLocation = '${icon.replace(/'/g, "''")}',0` : ""}`,
-      `$l.Description = 'ZCode+ Prompt Enhance'`,
-      `$l.Save()`,
-    ].filter(Boolean).join("; ");
-    execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '`"')}"`, { timeout: 30000 });
-    log("已创建桌面快捷方式 ZCode+");
+    if (fs.existsSync(desktopFile)) return;
+    const entry = [
+      "[Desktop Entry]",
+      "Type=Application",
+      "Name=ZCode+",
+      "Comment=ZCode+ 提示词增强（CDP 注入版）",
+      `Exec=${JSON.stringify(exe)} ${JSON.stringify(path.join(INSTALL_DIR, "controller.mjs"))}`,
+      "Terminal=false",
+      "Categories=Development;",
+    ].join("\n");
+    fs.mkdirSync(path.dirname(desktopFile), { recursive: true });
+    fs.writeFileSync(desktopFile, entry + "\n", "utf8");
+    log(`已创建 .desktop 入口：${desktopFile}`);
   } catch (error) {
-    log("创建桌面快捷方式失败（不影响使用）:", safeError(error));
+    log("创建 .desktop 入口失败（不影响使用）:", safeError(error));
   }
 }
 
@@ -752,18 +927,32 @@ async function main() {
   let found = findZcodePath();
   if (found.error || !found.path) {
     // 探测失败：引导用户在配置文件中手动填写 zcodePath（编辑保存后自动重试一次）
-    log(found.error || `未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`);
+    log(found.error || `未找到 ${ZCODE_BIN}，已尝试：${found.tried.join("; ")}`);
     const guide = found.error
       ? found.error
-      : `自动探测未找到 ZCode.exe（已尝试 ZCode+ 所在位置、各盘符常见目录、标准安装位置、PATH）。`;
+      : IS_WIN
+        ? "自动探测未找到 ZCode.exe（已尝试 ZCode+ 所在位置、各盘符常见目录、标准安装位置、PATH）。"
+        : "自动探测未找到 zcode 可执行文件（已尝试 ZCode+ 所在位置、PATH、标准安装位置）。";
+    const example = IS_WIN
+      ? `示例（推荐正斜杠，反斜杠需写成双反斜杠）：\n"zcodePath": "E:/zcode/ZCode.exe"`
+      : `示例：\n"zcodePath": "/opt/ZCode/zcode"`;
     const choice = showMessageBox(
-      guide + `\n\n请在配置文件中手动填写 zcodePath：\n${CONFIG_FILE}\n\n`
-        + `示例（推荐正斜杠，反斜杠需写成双反斜杠）：\n"zcodePath": "E:/zcode/ZCode.exe"\n\n`
-        + `是否现在用记事本打开配置文件编辑？（保存后 ZCode+ 自动重试）`,
+      guide + `\n\n请在配置文件中手动填写 zcodePath：\n${CONFIG_FILE}\n\n${example}\n\n`
+        + `是否现在打开配置文件编辑？（保存后 ZCode+ 自动重试）`,
       "YesNo",
     );
     if (choice.includes("Yes")) {
-      try { spawn("notepad.exe", [CONFIG_FILE], { detached: true, stdio: "ignore" }).unref(); } catch {}
+      if (IS_WIN) {
+        try { spawn("notepad.exe", [CONFIG_FILE], { detached: true, stdio: "ignore" }).unref(); } catch {}
+      } else {
+        // Linux：有 TTY 时用 $VISUAL/$EDITOR 前台编辑（阻塞期间下方轮询持续检测）；否则仅日志提示路径
+        const editor = process.env.VISUAL || process.env.EDITOR;
+        if (editor && process.stdin.isTTY) {
+          try { spawnSync(editor, [CONFIG_FILE], { stdio: "inherit" }); } catch {}
+        } else {
+          log(`请在终端编辑配置文件后保存：${CONFIG_FILE}`);
+        }
+      }
       // 轮询等待（最长 3 分钟）：路径有效即提前继续；用户已保存但路径仍无效/留空也提前结束
       // （Win11 记事本可能把文件并入已有窗口进程，不能依赖其进程生命周期）
       let mtimeBefore = 0;
@@ -779,10 +968,10 @@ async function main() {
     }
   }
   if (found.error || !found.path) {
-    const detail = found.error || `仍未找到 ZCode.exe，已尝试：${found.tried.join("; ")}`;
+    const detail = found.error || `仍未找到 ${ZCODE_BIN}，已尝试：${found.tried.join("; ")}`;
     log(detail);
     showMessageBox(
-      `启动失败：${found.error || "未找到 ZCode.exe。"}\n\n`
+      `启动失败：${found.error || `未找到 ${ZCODE_BIN}。`}\n\n`
         + `请在配置文件中检查 zcodePath 后重新运行：\n${CONFIG_FILE}\n\n日志：${LOG_FILE}`,
       "OK",
     );
@@ -801,10 +990,10 @@ async function main() {
   if (zcodeProcessesRunning()) {
     const close = await askCloseOriginal();
     if (!close) {
-      log("用户拒绝关闭原版 ZCode，退出");
+      log("用户拒绝关闭原版 ZCode（或无弹窗与终端可询问，按安全默认不关闭），退出");
       process.exit(0);
     }
-    try { execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" }); } catch {}
+    killZcodeProcesses();
     await new Promise((r) => setTimeout(r, 2500));
   }
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
@@ -822,7 +1011,8 @@ async function waitForCdp(port, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const version = await cdpVersion(port, 3000);
-    if (version) return version;
+    // 平台校验：镜像网络下端口应答可能来自另一系统的实例，不能当作自己拉起的就绪信号
+    if (version && cdpSamePlatform(version)) return version;
     await new Promise((r) => setTimeout(r, 800));
   }
   return null;

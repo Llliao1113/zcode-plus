@@ -5,7 +5,7 @@
 **为 ZCode 桌面版注入一键式提示词增强（Prompt Enhancement）**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)]()
+[![Platform: Windows | Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue.svg)]()
 [![Dependencies: Zero](https://img.shields.io/badge/Dependencies-Zero-green.svg)]()
 
 在输入框旁注入一颗星芒按钮 ✨ —— 点击把当前草稿发给模型，改写得更清晰后回填，检查后发送，支持撤销。
@@ -64,17 +64,17 @@ ZCode 桌面版是 Electron 应用，UI 为 Chromium 渲染的 Web DOM，但没�
 - Electron 远程调试（`--remote-debugging-port`）
 - 图标与安装器同为纯 Node 实现（PNG 解码 → ICO 打包）
 
-## 安装（Windows）
+## 安装
 
-### 方式一：下载发行包（推荐，零依赖）
+### Windows：方式一（下载发行包，推荐，零依赖）
 
-1. 从 [Releases](../../releases) 下载 `ZCodePlus-vX.Y.Z.zip`
+1. 从 [Releases](../../releases) 下载 `ZCodePlus-vX.Y.Z-win-x64.zip`
 2. 解压到任意目录（推荐 `%LOCALAPPDATA%\ZCodePlus`）
 3. 双击文件夹内 **「启动 ZCode+.vbs」** 即可使用；右键发送到桌面快捷方式可获得带独立图标（ZCode 原版图标反色：白底黑 Z）的「ZCode+」入口
 
 前置条件：已安装 ZCode 桌面版。首次运行自动探测安装位置（ZCode+ 所在目录及上级、各盘符 `\zcode` 目录、标准安装位置、PATH）；探测失败会弹窗引导，在安装目录的 `zcode-plus-config.json` 中手动填写 `zcodePath` 即可（首次运行自动生成该文件）。
 
-### 方式二：从源码运行（开发者）
+### Windows：方式二（从源码运行，开发者）
 
 ```bash
 git clone <本仓库地址>
@@ -83,6 +83,33 @@ node install.mjs        # 部署到 %LOCALAPPDATA%\ZCodePlus 并创建桌面快�
 ```
 
 或前台调试模式：`node controller.mjs`（控制台直接看日志）。
+
+### Linux / WSL2（下载发行包，推荐，零依赖）
+
+1. 从 [Releases](../../releases) 下载 `ZCodePlus-vX.Y.Z-linux-x64.tar.gz`
+2. 解压并安装（WSLg 环境下「ZCode+」入口会自动出现在 Windows 开始菜单）：
+
+```bash
+tar -xzf ZCodePlus-vX.Y.Z-linux-x64.tar.gz
+cd ZCodePlus-X.Y.Z-linux-x64
+./install.sh           # 安装到 ~/.local/share/ZCodePlus 并注册应用入口
+```
+
+或解压后直接前台运行：`./zcode-plus.sh`（Ctrl+C 退出；排错时看控制台输出）。
+
+前置条件：已安装 ZCode 桌面版（Linux deb 等）。自动探测覆盖 PATH（`command -v zcode` 及其指向的真实二进制）、`/opt/ZCode/zcode` 等标准位置；探测失败时按提示编辑同目录 `zcode-plus-config.json` 填 `zcodePath`（如 `/opt/ZCode/zcode`）。
+
+### Linux：从源码运行（开发者）
+
+```bash
+git clone <本仓库地址>
+cd zcode-plus
+node controller.mjs     # 需本机已装 Node 18+（推荐 22+）
+```
+
+### WSL2 双系统同跑说明
+
+WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux 侧的 127.0.0.1 互通：ZCode+ 已内置平台判别，Windows 控制器只附着 Windows 实例、Linux 控制器只附着 Linux 实例，两侧同时启动互不干扰；端口冲突时自动顺延（9334-9350）。
 
 ## 使用
 

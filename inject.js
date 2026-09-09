@@ -104,7 +104,8 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
       return Object.keys(localStorage)
         .filter((k) => k.startsWith(prefix))
         .map((k) => k.slice(prefix.length))
-        .filter((p) => /^[A-Za-z]:[\\/]/.test(p));
+        // ZCode Windows 存盘符路径、Linux 存 POSIX 绝对路径（/home/...），两种形态都放行
+        .filter((p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/"));
     } catch { return []; }
   }
   function controllerRequest(type, extra = {}, manualOverride) {
@@ -862,8 +863,20 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
       if (auto) {
         q("apiKey").value = "";
         q("apiKey").placeholder = "运行时读取，不保存";
-      } else q("apiKey").placeholder = "";
+      } else {
+        q("apiKey").placeholder = "";
+        // 从「自动」切到「手动」：清空由 readZcode 回填的网关地址与模型，避免
+        // 继承一套用户没有 key 的私有网关配置（协议保持用户选择，chat 默认）
+        if (q("baseUrl").dataset.fromAuto === "1") {
+          q("baseUrl").value = "";
+          q("model").value = "";
+          delete q("baseUrl").dataset.fromAuto;
+        }
+      }
     }
+    // 读取 ZCode 配置：只回填 baseUrl/model；协议保持用户上次选择（chat 为默认）。
+    // 不回填 protocol：auto 解析出的协议（如内置 plan 端点 anthropic）是网关实现细节，
+    // 回填会让手动模式继承一套与用户真实服务不匹配的协议，造成交叉污染
     async function run(action) {
       if (busy) return;
       busy = true;
@@ -874,8 +887,8 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
         if (action === "read") {
           const cfg = await controllerRequest("readConfig");
           q("baseUrl").value = cfg.baseUrl || "";
+          q("baseUrl").dataset.fromAuto = "1";
           q("model").value = cfg.model || "";
-          q("protocol").value = cfg.protocol || "chat";
           q("status").textContent = `已读取当前模型：${cfg.model}\n供应商 ${cfg.providerId}；凭据来源 ${cfg.keySource}（不保存）`;
         } else if (action === "models") {
           const result = await controllerRequest("models", {}, formManual());
@@ -886,7 +899,22 @@ Icons adapted from Lucide v1.8.0 (Sparkles, LoaderCircle, Undo2, X), ISC License
             option.value = id;
             list.appendChild(option);
           }
-          q("status").textContent = (result.models || []).length ? `已拉取 ${(result.models || []).length} 个模型` : "服务返回空模型列表";
+          // 模型输入框是受控 React 组件：datalist 塞 option 不触发重渲。这里主动清空一次
+          // 值（触发 input 事件让 React 状态更新），恢复后输入任意前缀即弹出目录下拉；
+          // 当前值若在目录中则保留显示
+          const modelInput = q("model");
+          const current = modelInput.value.trim();
+          const models = result.models || [];
+          if (current && models.includes(current)) {
+            modelInput.dataset.cataloged = "1";
+          } else {
+            modelInput.value = "";
+            modelInput.dataset.cataloged = "1";
+            modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+            modelInput.focus();
+            modelInput.placeholder = models.length ? "输入过滤，从下拉选择" : "(服务返回空模型列表)";
+          }
+          q("status").textContent = models.length ? `已拉取 ${models.length} 个模型` : "服务返回空模型列表";
         } else {
           const result = await controllerRequest("test", {}, formManual());
           q("status").textContent = result.message || "连接成功";
