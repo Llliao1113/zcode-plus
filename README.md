@@ -111,7 +111,25 @@ node controller.mjs     # 需本机已装 Node 18+（推荐 22+）
 
 WSL2 若启用镜像网络（`networkingMode=mirrored`），Windows 侧与 Linux 侧的 127.0.0.1 互通：ZCode+ 已内置平台判别，Windows 控制器只附着 Windows 实例、Linux 控制器只附着 Linux 实例，两侧同时启动互不干扰；端口冲突时自动顺延（9334-9350）。
 
-### macOS（从源码运行）
+### macOS（下载 beta 发行包，推荐，零依赖）
+
+1. 从 [Releases](../../releases) 下载 `ZCodePlus-vX.Y.Z-macos-arm64-beta.tar.gz`（Apple Silicon；Intel 机型暂用下方源码方式）
+2. 终端解压并安装（推荐 curl 下载，不触发 macOS 隔离属性；包内嵌官方 Node，无需安装任何依赖）：
+
+```bash
+curl -LO <Release 附件下载地址>
+tar -xzf ZCodePlus-vX.Y.Z-macos-arm64-beta.tar.gz
+cd ZCodePlus-X.Y.Z-macos-arm64-beta
+./install.sh
+```
+
+安装后桌面出现 **「ZCode+.app」**（双击启动，可拖入 Dock；生成逻辑与源码安装完全一致）。
+
+> **beta 说明**：macOS 支持由社区贡献并经真机实测核心链路（注入 / Cmd+A 回填 / 单实例锁），但发行包安装链路仍在验证期。遇问题请提 issue 并附安装目录 `zcode-plus.log`。
+>
+> **Gatekeeper 排错**：浏览器下载的包若提示「已损坏，无法打开」，执行 `xattr -dr com.apple.quarantine <解压目录>` 后重试（与 ZCode 官方安装排错同款方式）；curl 下载则通常无此问题。
+
+### macOS：从源码运行（开发者/Intel 机型）
 
 前置条件：已安装 ZCode 桌面版 + [Node.js](https://nodejs.org) 18+（推荐 22+）。
 
@@ -174,11 +192,9 @@ node install.mjs        # 部署到 ~/Library/Application Support/ZCodePlus
 ## 构建
 
 ```bash
-node build-exe.mjs    # Windows 上运行：生成 win-x64.zip（本地）+ linux-x64.tar.gz（委托 WSL）双发行包
+node build-exe.mjs    # Windows 上运行：生成 win-x64.zip（本地）+ linux-x64.tar.gz + macos-arm64-beta.tar.gz（均委托 WSL）
 node make-icon.mjs    # 从 ZCode 原版图标像素级反色生成 ZCode+ 图标（Windows ico；mac icns 由 install.mjs 生成）
 ```
-
-macOS 无需打包：`node install.mjs` 源码部署即可（发行包形态目前为 Windows / Linux）。
 
 ## 许可证与免责声明
 

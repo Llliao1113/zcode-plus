@@ -76,21 +76,31 @@ function main() {
   ${APP_DIR}\\ZCodePlus.exe（部署文件夹，双击「启动 ZCode+.vbs」或快捷方式使用）
   ${zipPath}（${size} MB，Release 附件）`);
   buildLinuxPackage(VERSION);
+  buildMacPackage(VERSION);
 }
 
 // Linux 包：委托 WSL 内执行 build-linux.sh（同一份源码同一版本；无 WSL 的机器跳过，
 // 贡献者可在原生 Linux 上直接运行该脚本）
 function buildLinuxPackage(version) {
   console.log("\n[linux] 尝试构建 Linux 发行包（经 WSL）…");
+  runWslBuild("build-linux.sh", "linux");
+}
+// macOS 包（beta）：同款 WSL 委托 build-macos.sh——Linux 侧只复制 darwin node 二进制不执行，
+// 组装逻辑与 linux 包同构。附件名带 beta 后缀，发行链路待 mac 真机验证
+function buildMacPackage(version) {
+  console.log("\n[macos] 尝试构建 macOS 发行包（经 WSL，beta）…");
+  runWslBuild("build-macos.sh", "macos");
+}
+function runWslBuild(script, tag) {
   try {
     const wslRoot = ROOT.replace(/^([A-Za-z]):[\\/]/, (_m, drive) => `/mnt/${drive.toLowerCase()}/`).replace(/\\/g, "/");
-    const r = spawnSync("wsl.exe", ["-e", "bash", path.posix.join(wslRoot, "build-linux.sh"), version], {
+    const r = spawnSync("wsl.exe", ["-e", "bash", path.posix.join(wslRoot, script), VERSION], {
       encoding: "utf8", timeout: 600000, stdio: ["ignore", "pipe", "pipe"],
     });
     if (r.status === 0) return;
-    console.log(`[linux] 构建失败（status=${r.status}）：${String(r.stderr || r.stdout || "").slice(0, 400)}`);
+    console.log(`[${tag}] 构建失败（status=${r.status}）：${String(r.stderr || r.stdout || "").slice(0, 400)}`);
   } catch (error) {
-    console.log(`[linux] 无可用 WSL，跳过（可在 Linux 内直接运行 build-linux.sh）：${error?.message || error}`);
+    console.log(`[${tag}] 无可用 WSL，跳过（可在 Linux 内直接运行 ${script}）：${error?.message || error}`);
   }
 }
 main();
