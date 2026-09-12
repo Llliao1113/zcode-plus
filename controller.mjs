@@ -394,9 +394,13 @@ function zcodeProcessesRunning() {
       return /ZCode\.exe/i.test(out);
     }
     if (IS_MAC) {
-      // macOS：主进程名 ZCode；launchd 收养孤儿自动收尸，无 WSL 的僵尸误报问题
-      execSync("pgrep -x ZCode", { stdio: "ignore", timeout: 5000 });
-      return true;
+      // macOS：主进程名 ZCode；launchd 收养孤儿自动收尸，无 WSL 的僵尸误报问题。
+      // 用 ps 精确匹配而非 pgrep：部分机器 pgrep 看不到 ZCode 主进程（ps 可见），
+      // 会导致「原版在运行」漏检、第二实例被单实例锁静默弹回。
+      // basename 兼容：ps -o comm 语义是 argv[0]，ZCode 主程序自设 process.title 后
+      // 显示裸名，但其他启动/打包形态可能是全路径——两种都接受
+      const out = execSync("ps -A -o comm=", { encoding: "utf8", timeout: 5000 });
+      return out.split(/\r?\n/).some((c) => /(?:^|\/)ZCode(\.exe)?$/.test(c.trim()));
     }
     // Linux：Electron 根进程名是 ZCode（产品名）、子进程是 zcode（二进制名），须双形态不区分大小写匹配；
     // 且必须排除僵尸态（stat 以 Z 开头）——WSL 的 init 不收养孤儿，上一轮残留的僵尸进程
@@ -408,13 +412,26 @@ function zcodeProcessesRunning() {
     });
   } catch { return false; }
 }
-function killZcodeProcesses() {
+// macOS 主进程 pid 枚举（ps 精确匹配，规避 pgrep 同源漏检）
+function macZcodePids() {
+  try {
+    return execSync("ps -A -o pid=,comm=", { encoding: "utf8", timeout: 5000 })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /(?:^|\/)ZCode(\.exe)?$/.test(line.replace(/^\d+\s+/, "")))
+      .map((line) => parseInt(line, 10))
+      .filter(Number.isFinite);
+  } catch { return []; }
+}
+async function killZcodeProcesses() {
   try {
     if (IS_WIN) { execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" }); return; }
     if (IS_MAC) {
-      // 与 Linux 同款两段杀：先 TERM 允许 Electron 正常收尾，仍存活再强杀
-      execSync("pkill -x ZCode", { stdio: "ignore", timeout: 5000 });
-      if (zcodeProcessesRunning()) execSync("pkill -x -KILL ZCode", { stdio: "ignore", timeout: 5000 });
+      // 两段杀：先 TERM 允许 Electron 正常收尾，等待后再对幸存者 KILL。
+      // 按 pid 用 process.kill：pkill 与 pgrep 进程枚举同源，ps 可见而 pgrep 不可见的机器上会漏杀
+      for (const pid of macZcodePids()) { try { process.kill(pid, "SIGTERM"); } catch {} }
+      await new Promise((r) => setTimeout(r, 1500));
+      for (const pid of macZcodePids()) { try { process.kill(pid, "SIGKILL"); } catch {} }
       return;
     }
     // 先 TERM 允许 Electron 正常收尾（等同用户点关闭），仍存活再强杀（taskkill /F 等价物）；
@@ -702,6 +719,19 @@ function parseOutputText(data) {
   }
   return "";
 }
+// 思考链剥离：部分模型/兼容层把思考内联在 content 正文里——GLM/Qwen 系为
+// <think>…</think> 成对块，有的兼容层吞掉开标签只留「思考…</think>正文」形态。
+// 思考链混入增强结果会原样回填进输入框，必须在出口统一剥离
+function stripThinking(text) {
+  let out = String(text);
+  out = out.replace(/<think>[\s\S]*?<\/think>/gi, ""); // 成对思考块（大小写不敏感，部分模型用 <Think>）
+  out = out.replace(/<think>[\s\S]*$/gi, "");          // 未闭合残块（思考被截断，其后已无正文）
+  // 孤立闭合标签：正文在最后一次闭合之后。用 matchAll 而非 lastIndexOf——后者大小写敏感，
+  // 会漏掉 </THINK> 形态。取舍：正文本身含字面闭合标签（极罕见）时保留最后一段
+  const closers = [...out.matchAll(/<\/think>/gi)];
+  if (closers.length) out = out.slice(closers[closers.length - 1].index + closers[closers.length - 1][0].length);
+  return out.trim();
+}
 // 思考参数：按协议映射。chat 同时带 OpenAI 风格 reasoning_effort 与 GLM 风格 thinking
 // （多余字段主流兼容层会忽略）；GLM 系列思考默认开启，关闭需显式 thinking disabled。
 // thinking 未传（旧版页面运行时）时完全不带思考字段，保持服务默认行为
@@ -751,18 +781,44 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate, thinking) {
       ...thinkingParams(thinking, cfg.protocol, cfg.model),
     };
   }
-  let res;
-  try {
-    res = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body) });
-  } catch (error) {
-    const reason = error?.name === "AbortError" ? "请求超过 90 秒" : safeError(error, [cfg.apiKey]);
-    throw new Error(`连接模型服务失败：${reason}`);
+  // 网关瞬时故障重试：天翼云等网关有秒级 5xx 突发（实测连续 4 秒内 3 连 500，随后自愈），
+  // 且 5xx 最常见形态是 HTML 错误页（nginx/Caddy 502/504）。指数退避 1/3/8/15s 最多 5 次
+  // 尝试，全部快速失败总耗时约 32s，仍在 90s 页面预算内；4xx 属配置错误、超时已耗尽
+  // 预算、ENOTFOUND（域名不存在，几乎必为 URL 配置错误）均不重试
+  const RETRY_DELAYS_MS = [1000, 3000, 8000, 15000];
+  let res, text, data;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body) });
+    } catch (error) {
+      const netCode = String(error?.cause?.code || error?.code || "");
+      if (attempt <= RETRY_DELAYS_MS.length && error?.name !== "AbortError" && netCode !== "ENOTFOUND") {
+        log(`请求网络错误 (第 ${attempt} 次)，重试:`, safeError(error, [cfg.apiKey]));
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+        continue;
+      }
+      const reason = error?.name === "AbortError" ? "请求超过 90 秒" : safeError(error, [cfg.apiKey]);
+      throw new Error(`连接模型服务失败：${reason}`);
+    }
+    text = await res.text();
+    if (text.length > 2 * 1024 * 1024) throw new Error("响应超过 2 MiB 安全上限");
+    // 重试判断必须在 JSON.parse 之前：HTML 错误页不可解析，先解析会把瞬时 5xx
+    // 误报成「响应解析失败」且绕过重试。429 同样纳入（短窗限流可在退避表内恢复）
+    if (res.ok) break;
+    if ((res.status >= 500 || res.status === 429) && attempt <= RETRY_DELAYS_MS.length) {
+      log(`网关 ${res.status} (第 ${attempt} 次)，重试。响应体:`, text.slice(0, 300).replace(/\s+/g, " "));
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+      continue;
+    }
+    break; // 4xx / 重试用尽：走下方错误处理
   }
-  const text = await res.text();
-  if (text.length > 2 * 1024 * 1024) throw new Error("响应超过 2 MiB 安全上限");
-  let data;
-  try { data = JSON.parse(text); } catch {
-    throw new Error(/^\s*</.test(text) ? "响应解析失败：收到 HTML 而非 JSON，请检查服务地址" : "响应解析失败：内容不是有效 JSON");
+  if (res.ok) {
+    try { data = JSON.parse(text); } catch {
+      throw new Error(/^\s*</.test(text) ? "响应解析失败：收到 HTML 而非 JSON，请检查服务地址" : "响应解析失败：内容不是有效 JSON");
+    }
+  } else {
+    // 错误响应尽量解析出 detail；HTML 错误页解析失败置 null，extractError 兼容 null
+    try { data = JSON.parse(text); } catch { data = null; }
   }
   if (!res.ok) {
     const detail = extractError(data);
@@ -771,14 +827,14 @@ async function callLLM(cfg, draft, enhanceMode, customTemplate, thinking) {
     if (data?.code === 3007 || /captcha/i.test(String(data?.msg || ""))) {
       throw new Error(`该服务网关带反自动化验证（${detail || `HTTP ${res.status}`}），拒绝 ZCode+ 直连。请右键 ✨ 按钮打开设置，取消「跟随 ZCode 当前模型」，改用手动模式（可直连的 Base URL + API Key）后重试`);
     }
-    throw new Error(`HTTP ${res.status}${detail ? "; " + detail : ""}`);
+    throw new Error(`HTTP ${res.status}${detail ? "; " + detail : ""}${res.status >= 500 ? "（网关瞬时故障，已重试）" : ""}`);
   }
   if (data?.error) throw new Error(`生成失败：${extractError(data) || "服务返回错误"}`);
   const reason = data?.choices?.[0]?.finish_reason || data?.stop_reason;
   if (reason && !["stop", "end_turn", "max_tokens"].includes(reason)) {
     throw new Error(`生成未正常完成 (${String(reason).slice(0, 40)})`);
   }
-  const output = parseOutputText(data);
+  const output = stripThinking(parseOutputText(data));
   if (!output.trim()) {
     throw new Error(`模型未返回文本${Number.isFinite(data?.usage?.output_tokens) ? ` (output_tokens=${data.usage.output_tokens})` : ""}，请检查模型与协议是否匹配`);
   }
@@ -1111,7 +1167,7 @@ async function main() {
       log("用户拒绝关闭原版 ZCode（或无弹窗与终端可询问，按安全默认不关闭），退出");
       process.exit(0);
     }
-    killZcodeProcesses();
+    await killZcodeProcesses();
     await new Promise((r) => setTimeout(r, 2500));
   }
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
