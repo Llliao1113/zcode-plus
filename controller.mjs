@@ -408,7 +408,7 @@ function zcodeProcessesRunning() {
     });
   } catch { return false; }
 }
-function killZcodeProcesses() {
+async function killZcodeProcesses() {
   try {
     if (IS_WIN) { execSync('taskkill /IM ZCode.exe /F', { stdio: "ignore" }); return; }
     if (IS_MAC) {
@@ -418,8 +418,10 @@ function killZcodeProcesses() {
       return;
     }
     // 先 TERM 允许 Electron 正常收尾（等同用户点关闭），仍存活再强杀（taskkill /F 等价物）；
-    // -x -i 同时覆盖根进程 ZCode 与子进程 zcode（只杀小写会留下不收尸的根进程和僵尸残骸）
+    // -x -i 同时覆盖根进程 ZCode 与子进程 zcode（只杀小写会留下不收尸的根进程和僵尸残骸）。
+    // TERM 后必须等待再检查存活：立即检查时进程尚在收尾、必然命中 KILL 分支，等于跳过优雅退出
     execSync("pkill -x -i zcode", { stdio: "ignore", timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 1500));
     if (zcodeProcessesRunning()) execSync("pkill -x -i -KILL zcode", { stdio: "ignore", timeout: 5000 });
   } catch {}
 }
@@ -1111,7 +1113,7 @@ async function main() {
       log("用户拒绝关闭原版 ZCode（或无弹窗与终端可询问，按安全默认不关闭），退出");
       process.exit(0);
     }
-    killZcodeProcesses();
+    await killZcodeProcesses();
     await new Promise((r) => setTimeout(r, 2500));
   }
   // 3) 分配端口（bind 校验，杜绝冲突）并拉起 ZCode+
